@@ -46,13 +46,18 @@ def execute() -> None:
     _add("install_logging.conf", "conf/install_logging.conf")
     _add("installlib.py", "installlib.py")
     _add("install.py", "install.py")
+    _add("slurmel8insiders.repo", "slurmel8insiders.repo")
+    _add("slurmel9insiders.repo", "slurmel9insiders.repo")
     _add("slurmel8.repo", "slurmel8.repo")
     _add("slurmel9.repo", "slurmel9.repo")
     _add("ubuntu.sh", "ubuntu.sh", 600)
     _add("rhel.sh", "rhel.sh", 600)
+    _add("imex_prolog.sh", "imex_prolog.sh", 600)
+    _add("imex_epilog.sh", "imex_epilog.sh", 600)
     _add("AzureCA.pem", "AzureCA.pem")
     _add("suse.sh", "suse.sh", 600)
     _add("start-services.sh", "start-services.sh", 555)
+    _add("capture_logs.sh", "capture_logs.sh", 755)
 
     for fil in os.listdir("templates"):
         if os.path.isfile(f"templates/{fil}"):

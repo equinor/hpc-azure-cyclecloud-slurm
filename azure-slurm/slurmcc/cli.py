@@ -39,23 +39,25 @@ from . import cost
 from . import topology
 
 
-VERSION = "4.0.0"
+VERSION = "4.0.3"
 
 
 def csv_list(x: str) -> List[str]:
     # used in argument parsing
     return [x.strip() for x in x.split(",")]
 
-
+__INITIALIZED_FNAMES = {}
 def init_power_saving_log(function: Callable) -> Callable:
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         root_logger = logging.getLogger()
         for handler in root_logger.handlers:
             if hasattr(handler, "baseFilename"):
                 fname = getattr(handler, "baseFilename")
-                if fname and fname.endswith(f"{function.__name__}.log"):
-                    handler.setLevel(logging.INFO)
-                    logging.info(f"initialized {function.__name__}.log")
+                if fname not in __INITIALIZED_FNAMES:
+                    if fname and fname.endswith(f"{function.__name__}.log"):
+                        handler.setLevel(logging.INFO)
+                        logging.info(f"initialized {function.__name__}.log")
+                        __INITIALIZED_FNAMES[fname] = True
         return function(*args, **kwargs)
 
     wrapped.__doc__ = function.__doc__
@@ -188,28 +190,49 @@ class SlurmCLI(CommonCLI):
     
     def topology_parser(self, parser: ArgumentParser) -> None:
         group = parser.add_mutually_exclusive_group(required=False)
+        topology_group = parser.add_mutually_exclusive_group(required=False)
         parser.add_argument('-p,','--partition', type=str, help="Specify the parititon")
         parser.add_argument('-o', '--output', type=str, help="Specify slurm topology file output")
-        group.add_argument('-v', '--use_vmss', action='store_true', default=True, help='Use VMSS (default: True)')
-        group.add_argument('-f', '--use_fabric_manager', action='store_true', default=False, help='Use Fabric Manager (default: False)')
-    def topology(self, config: Dict, partition, output, use_vmss, use_fabric_manager):
+        group.add_argument('-v', '--use_vmss', action='store_true', default=True, help='Use VMSS to map Tree or Block topology along VMSS boundaries without special network consideration (default: True)')
+        group.add_argument('-f', '--use_fabric_manager', action='store_true', default=False, help='Use Fabric Manager to map Tree topology (Block topology not allowed) according to SHARP network topology tool(default: False)')
+        group.add_argument('-n', '--use_nvlink_domain', action='store_true', default=False, help='Use NVlink domain to map Block topology (Tree topology not allowed) according to NVLink Domain and Partition for multi-node NVLink (default: False)')
+        topology_group.add_argument('-b', '--block', action='store_true', default=False, help='Generate Block Topology output to use Block topology plugin (default: False)')
+        topology_group.add_argument('-t', '--tree', action='store_true', default=False, help='Generate Tree Topology output to use Tree topology plugin(default: False)')
+        parser.add_argument("-s", "--block_size", type=int, required=False, help="Minimum block size required for each block (use with --block or --use_nvlink_domain, default: 1)")
+
+    def topology(self, config: Dict, partition, output, use_vmss, use_fabric_manager, use_nvlink_domain, tree, block, block_size) -> None:
         """
         Generates Topology Plugin Configuration
         """
         if use_fabric_manager:
             if not partition:
                 raise ValueError("--partition is required when using --use_fabric_manager")
+            if block or block_size:
+                raise ValueError("--block and --block_size are not supported with --use_fabric_manager")
+            topo_type = topology.TopologyType.TREE
             config_dir = config.get("config_dir")
-            topo = topology.Topology(partition,output,config_dir)
+            topo = topology.Topology(partition, output, topology.TopologyInput.FABRIC, topo_type, config_dir)
+            topo.run()
+        elif use_nvlink_domain:
+            if not partition:
+                raise ValueError("--partition is required when using --use_nvlink_domain")
+            if tree:
+                raise ValueError("--tree is not supported with --use_nvlink_domain")
+            block_size = block_size or 1
+            topo_type = topology.TopologyType.BLOCK
+            config_dir = config.get("config_dir")
+            topo = topology.Topology(partition, output, topology.TopologyInput.NVLINK, topo_type, config_dir, block_size)
             topo.run()
         elif use_vmss:
+            if block or block_size:
+                raise ValueError("--block and --block_size are not supported with --use_vmss")
             if output:
                 with open(output, 'w', encoding='utf-8') as file_writer:
                     return _generate_topology(self._get_node_manager(config), file_writer)
             else:
                 return _generate_topology(self._get_node_manager(config), sys.stdout)
         else:
-            raise ValueError("Please specify either --use_vmss or --use_fabric_manager")
+            raise ValueError("Please specify either --use_vmss or --use_fabric_manager or --use_nvlink_domain")
     
     def partitions_parser(self, parser: ArgumentParser) -> None:
         parser.add_argument("--allow-empty", action="store_true", default=False)
@@ -232,7 +255,7 @@ class SlurmCLI(CommonCLI):
         parser.add_argument(
             "--node-list", type=hostlist, required=True
         ).completer = self._slurm_node_name_completer  # type: ignore
-        parser.add_argument("--no-wait", action="store_true", default=False)
+        parser.add_argument("--no-wait", action="store_true", default=False, help="DEPRECATED")
 
     @init_power_saving_log
     def resume(self, config: Dict, node_list: List[str], no_wait: bool = False) -> None:
@@ -249,17 +272,6 @@ class SlurmCLI(CommonCLI):
             raise AzureSlurmError(
                 f"Failed to boot {node_list} - {bootup_result.message}"
             )
-        if no_wait:
-            return
-
-        def get_latest_nodes() -> List[Node]:
-            node_mgr = self._get_node_manager(config, force=True)
-            return node_mgr.get_nodes()
-
-        booted_node_list = [n.name for n in (bootup_result.nodes or [])]
-        allocation.wait_for_resume(
-            config, bootup_result.operation_id, booted_node_list, get_latest_nodes
-        )
 
     def wait_for_resume_parser(self, parser: ArgumentParser) -> None:
         parser.set_defaults(read_only=False)
@@ -347,6 +359,7 @@ class SlurmCLI(CommonCLI):
         parser.set_defaults(read_only=False)
         parser.add_argument("--terminate-zombie-nodes", action="store_true", default=False)
 
+    @init_power_saving_log
     def return_to_idle(
         self, config: Dict, terminate_zombie_nodes: bool = False
     ) -> None:
@@ -494,13 +507,12 @@ class SlurmCLI(CommonCLI):
 
     def _initconfig_parser(self, parser: ArgumentParser) -> None:
         # TODO
-        parser.add_argument("--accounting-tag-name", dest="accounting__tag_name")
-        parser.add_argument("--accounting-tag-value", dest="accounting__tag_value")
         parser.add_argument(
             "--accounting-subscription-id", dest="accounting__subscription_id"
         )
         parser.add_argument("--cost-cache-root", dest="cost__cache_root")
         parser.add_argument("--config-dir", required=True)
+        parser.add_argument("--azslurmd-sleep-time", default=15, dest="azslurmd__sleep_time")
 
     def _initconfig(self, config: Dict) -> None:
         # TODO
@@ -647,56 +659,14 @@ class SlurmCLI(CommonCLI):
     ) -> None:
         """
         Add, remove or set which nodes should be prevented from being shutdown.
-
         """
+        action = "add"
+        if remove:
+            action = "remove"
+        elif set_nodes:
+            action = "set"
+        slutil.update_suspend_exc_nodes(action, ",".join(node_list))
 
-        config_dir = config.get("config_dir")
-        if remove and set_nodes:
-            raise AzureSlurmError("Please define only --set or --remove, not both.")
-
-        lines = slutil.check_output(["scontrol", "show", "config"]).splitlines()
-        filtered = [
-            line for line in lines if line.lower().startswith("suspendexcnodes")
-        ]
-        current_susp_nodes = []
-        if filtered:
-            current_susp_nodes_expr = filtered[0].split("=")[-1].strip()
-            if current_susp_nodes_expr != "(null)":
-                current_susp_nodes = slutil.from_hostlist(current_susp_nodes_expr)
-
-        if set_nodes:
-            hostnames = list(set(node_list))
-        elif remove:
-            hostnames = list(set(current_susp_nodes) - set(node_list))
-        else:
-            hostnames = current_susp_nodes + node_list
-
-        all_susp_hostnames = (
-            slutil.check_output(
-                [
-                    "scontrol",
-                    "show",
-                    "hostnames",
-                    ",".join(hostnames),
-                ]
-            )
-            .strip()
-            .split()
-        )
-        all_susp_hostnames = sorted(
-            list(set(all_susp_hostnames)), key=slutil.get_sort_key_func(False)
-        )
-        all_susp_hostlist = slutil.check_output(
-            ["scontrol", "show", "hostlist", ",".join(all_susp_hostnames)]
-        ).strip()
-
-        with open(f"{config_dir}/keep_alive.conf.tmp", "w") as fw:
-            if all_susp_hostlist:
-                fw.write(f"SuspendExcNodes = {all_susp_hostlist}")
-            else:
-                fw.write("# SuspendExcNodes = ")
-        shutil.move(f"{config_dir}/keep_alive.conf.tmp", f"{config_dir}/keep_alive.conf")
-        slutil.check_output(["scontrol", "reconfig"])
 
     def accounting_info_parser(self, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--node-name", required=True)
@@ -1033,6 +1003,12 @@ def _as_nodes(node_list: List[str], node_mgr: NodeManager) -> List[Node]:
             raise AzureSlurmError(f"Unknown node - {node_name}")
         nodes.append(by_name[node_name])
     return nodes
+
+
+
+def new_node_manager(config: str = "/opt/azurehpc/slurm/autoscale.json") -> NodeManager:
+    config = hpcutil.load_config("/opt/azurehpc/slurm/autoscale.json")
+    return SlurmCLI()._get_node_manager(config, force=True)
 
 
 def main(argv: Optional[Iterable[str]] = None) -> None:

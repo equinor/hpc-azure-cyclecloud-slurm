@@ -18,9 +18,6 @@ Autoscale = $Autoscale
     KeyPairLocation = ~/.ssh/cyclecloud.pem
     Azure.Identities = $ManagedIdentity
     Tags = $NodeTags
-    
-    # Slurm autoscaling supports both Terminate and Deallocate shutdown policies
-    ShutdownPolicy = $configuration_slurm_shutdown_policy
 
     # Lustre mounts require termination notifications to unmount
     EnableTerminateNotification = ${NFSType == "lustre" || NFSSchedType == "lustre" || AdditionalNFSType == "lustre" || EnableTerminateNotification}
@@ -29,10 +26,12 @@ Autoscale = $Autoscale
         [[[configuration]]]
 
         slurm.version = $configuration_slurm_version
+        slurm.insiders = false
         slurm.user.uid = 11100
         slurm.user.gid = 11100
         munge.user.uid = 11101
         munge.user.gid = 11101
+        slurm.enable_healthchecks = true
         slurm.accounting.enabled = $configuration_slurm_accounting_enabled
         slurm.accounting.url = $configuration_slurm_accounting_url
         slurm.accounting.user = $configuration_slurm_accounting_user
@@ -63,8 +62,10 @@ Autoscale = $Autoscale
         # May be used to identify the ID in cluster-init scripts
         cluster.identities.default = $ManagedIdentity
 
-        [[[cluster-init slurm:default:4.0.0]]]
+        [[[cluster-init cyclecloud/healthagent:default]]]
+        [[[cluster-init cyclecloud/slurm:default:4.0.3]]]
         Optional = true
+        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
 
         [[[volume boot]]]
         Size = ${ifThenElse(BootDiskSize > 0, BootDiskSize, undefined)}
@@ -110,13 +111,16 @@ Autoscale = $Autoscale
     Zone = ${ifThenElse(configuration_slurm_ha_enabled, SchedulerZone, undefined)}
     
         [[[configuration]]]
+        slurm.role = scheduler
         # Disable NFS mount of built-in /sched since it is a local volume mount: cyclecloud.mounts.builtinsched
         cyclecloud.mounts.nfs_sched.disabled = ${UseBuiltinSched && !configuration_slurm_ha_enabled}
         cyclecloud.mounts.nfs_shared.disabled = ${UseBuiltinShared && !configuration_slurm_ha_enabled}
         slurm.secondary_scheduler_name = ${ifThenElse(configuration_slurm_ha_enabled, "scheduler-ha-1", undefined)}
 
 
-        [[[cluster-init slurm:scheduler:4.0.0]]]
+        [[[cluster-init cyclecloud/healthagent:default]]]
+        [[[cluster-init cyclecloud/slurm:scheduler:4.0.3]]]
+        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
 
         [[[network-interface eth0]]]
         AssociatePublicIpAddress = $UsePublicNetwork
@@ -178,8 +182,11 @@ Autoscale = $Autoscale
         ImageName = $LoginImageName
         AdditionalClusterInitSpecs = $LoginClusterInitSpecs
 
-        [[[cluster-init slurm:login:4.0.0]]]
+        [[[cluster-init cyclecloud/healthagent:default]]]
+        [[[cluster-init cyclecloud/slurm:login:4.0.3]]]
+        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
         [[[configuration]]]
+        slurm.role = login
         autoscale.enabled = false
         slurm.node_prefix = ${ifThenElse(NodeNamePrefix=="Cluster Prefix", StrJoin("-", ClusterName, ""), NodeNamePrefix)}
         slurm.use_nodename_as_hostname = $NodeNameIsHostname
@@ -187,12 +194,15 @@ Autoscale = $Autoscale
     [[node nodearraybase]]
     Abstract = true
         [[[configuration]]]
+        slurm.role = execute
         slurm.autoscale = true
 
         slurm.node_prefix = ${ifThenElse(NodeNamePrefix=="Cluster Prefix", StrJoin("-", ClusterName, ""), NodeNamePrefix)}
         slurm.use_nodename_as_hostname = $NodeNameIsHostname
 
-        [[[cluster-init slurm:execute:4.0.0]]]
+        [[[cluster-init cyclecloud/healthagent:default]]]
+        [[[cluster-init cyclecloud/slurm:execute:4.0.3]]]
+        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
 
         [[[network-interface eth0]]]
         AssociatePublicIpAddress = $ExecuteNodesPublic
@@ -244,6 +254,9 @@ Autoscale = $Autoscale
         slurm.default_partition = true
         slurm.hpc = true
         slurm.partition = gpu
+        #Parameter to enable or disable IMEX service on a per-job basis
+        #IMEX Support is enabled by default for GB200 but can be disabled by setting param to False
+        #slurm.imex.enabled=True
 
     [[nodearray dynamic]]
     Extends = nodearraybase
@@ -339,7 +352,7 @@ Order = 10
         Description = The total number of HTC execute nodes to start
         DefaultValue = 100
         Config.Plugin = pico.form.NumberTextBox
-        Config.MinValue = 1
+        Config.MinValue = 0
         Config.IntegerOnly = true
 
         [[[parameter MaxHPCExecuteNodeCount]]]
@@ -347,7 +360,7 @@ Order = 10
         Description = The total number of HPC execute nodes to start
         DefaultValue = 16
         Config.Plugin = pico.form.NumberTextBox
-        Config.MinValue = 1
+        Config.MinValue = 0
         Config.IntegerOnly = true
 
         [[[parameter MaxGPUExecuteNodeCount]]]
@@ -355,7 +368,7 @@ Order = 10
         Description = The total number of GPU execute nodes to start
         DefaultValue = 8
         Config.Plugin = pico.form.NumberTextBox
-        Config.MinValue = 1
+        Config.MinValue = 0
         Config.IntegerOnly = true
 
         [[[parameter MaxDynamicExecuteCoreCount]]]
@@ -708,8 +721,8 @@ Order = 20
         ParameterType = StringList
         Config.Plugin = pico.form.Dropdown
         Config.FreeForm = true
-        Config.Entries := {[Value="24.05.6-1"], [Value="24.11.3-1"]}
-        DefaultValue = 24.11.3-1
+        Config.Entries := {[Value="25.05.2"]}
+        DefaultValue = 25.05.2
 
         [[[parameter configuration_slurm_accounting_enabled]]]
         Label = Job Accounting
@@ -754,18 +767,6 @@ Order = 20
         Config.Entries := {[Value=""], [Value="AzureCA.pem"]}
         DefaultValue = ""
 
-        [[[parameter configuration_slurm_shutdown_policy]]]
-	    Label = Shutdown Policy
-        description = By default, autostop will Delete stopped VMS for lowest cost.  Optionally, Stop/Deallocate the VMs for faster restart instead.
-        DefaultValue = Terminate
-        config.plugin = pico.control.AutoCompleteDropdown
-            [[[[list Config.Entries]]]]
-            Name = Terminate
-            Label = Terminate
-            [[[[list Config.Entries]]]]
-            Name = Deallocate
-            Label = Deallocate
-
         [[[parameter EnableTerminateNotification]]]
         Label = Enable Termination notifications
         DefaultValue = False        
@@ -778,7 +779,7 @@ Order = 20
         [[[parameter configuration_slurm_launch_parameters]]]
         Label = Launch Parameters
         Description = Deploy Slurm with Launch Parameters (comma delimited)
-        DefaultValue = ''
+        DefaultValue = 'use_interactive_step'
         ParameterType = String
 
 
@@ -817,42 +818,42 @@ Order = 20
         Label = Scheduler OS
         ParameterType = Cloud.Image
         Config.OS = linux
-        DefaultValue = almalinux8
+        DefaultValue = cycle.image.ubuntu22
         Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
 
         [[[parameter LoginImageName]]]
         Label = Login Node OS
         ParameterType = Cloud.Image
         Config.OS = linux
-        DefaultValue = almalinux8
+        DefaultValue = cycle.image.ubuntu22
         Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
 
         [[[parameter HPCImageName]]]
         Label = HPC OS
         ParameterType = Cloud.Image
         Config.OS = linux
-        DefaultValue = almalinux8
+        DefaultValue = cycle.image.ubuntu22
         Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
 
         [[[parameter HTCImageName]]]
         Label = HTC OS
         ParameterType = Cloud.Image
         Config.OS = linux
-        DefaultValue = almalinux8
+        DefaultValue = cycle.image.ubuntu22
         Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
 
         [[[parameter GPUImageName]]]
         Label = GPU OS
         ParameterType = Cloud.Image
         Config.OS = linux
-        DefaultValue = almalinux8
+        DefaultValue = cycle.image.ubuntu22
         Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
 
         [[[parameter DynamicImageName]]]
         Label = Dynamic OS
         ParameterType = Cloud.Image
         Config.OS = linux
-        DefaultValue = almalinux8
+        DefaultValue = cycle.image.ubuntu22
         Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
 
         [[[parameter SchedulerClusterInitSpecs]]]

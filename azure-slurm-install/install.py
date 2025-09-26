@@ -104,12 +104,14 @@ class InstallSettings:
         self.additonal_slurm_config = (
             config["slurm"].get("additional", {}).get("config")
         )
+        self.launch_parameters = config["slurm"].get("launch_parameters", "")
 
         self.secondary_scheduler_name = config["slurm"].get("secondary_scheduler_name")
         self.is_primary_scheduler = config["slurm"].get("is_primary_scheduler", self.mode == "scheduler")
         self.config_dir = f"/sched/{self.slurm_cluster_name}"
         # Leave the ability to disable this.
         self.ubuntu22_waagent_fix = config["slurm"].get("ubuntu22_waagent_fix", True)
+        self.enable_healthchecks = config["slurm"].get("enable_healthchecks", True)
 
 
 def _inject_vm_size(dynamic_config: str, vm_size: str) -> str:
@@ -161,7 +163,42 @@ def setup_users(s: InstallSettings) -> None:
 
 
 def run_installer(s: InstallSettings, path: str, mode: str) -> None:
-    subprocess.check_call([path, mode, s.slurmver])
+    INSTALL_FILE = "/etc/azslurm-bins.installed"
+    attr = {}
+    if os.path.exists(INSTALL_FILE):
+        try:
+            with open(INSTALL_FILE, 'r') as fp:
+                contents = fp.read()
+                for line in contents.splitlines():
+                    key, value = line.split("=")
+                    attr[key] = value
+            if attr.get("SLURM_VERSION") != s.slurmver:
+                logging.warning(f"Slurm version installed: {attr['SLURM_VERSION']}, slurm version requested: {s.slurmver}")
+            elif attr["MODE"] != "install-only" and attr["MODE"] != mode:
+                logging.warning(f"Role configured {attr['MODE']} role requested: {mode}")
+            elif int(attr["EXIT_CODE"]) != 0:
+                logging.warning(f"Previous package install did not succeed, re-running it")
+            else:
+                # Everything is already installed
+                logging.info(f"Required slurm version: {attr['SLURM_VERSION']} already installed.")
+                return
+        except Exception as e:
+            logging.exception(e)
+        os.remove(INSTALL_FILE)
+
+
+    logging.info(f"Running script {path}, slurm version: {s.slurmver}, mode={mode}")
+    out = subprocess.run([path, mode, s.slurmver], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    logging.debug(out.stdout)
+    if out.returncode != 0:
+        logging.error(out.stderr)
+        raise Exception(f"{path} returned error")
+    else:
+        with open(INSTALL_FILE, 'w') as fp:
+            fp.write(f"SLURM_VERSION={s.slurmver}\n")
+            fp.write(f"MODE={mode}\n")
+            fp.write(f"EXIT_CODE={out.returncode}\n")
+
 
 
 def fix_permissions(s: InstallSettings) -> None:
@@ -375,6 +412,24 @@ def _complete_install_primary(s: InstallSettings) -> None:
     if not os.path.exists(state_save_location):
         ilib.directory(state_save_location, owner=s.slurm_user, group=s.slurm_grp)
 
+    if not os.path.exists(f"{s.config_dir}/prolog.d"):
+        ilib.directory(f"{s.config_dir}/prolog.d", owner=s.slurm_user, group=s.slurm_grp)
+
+    if not os.path.exists(f"{s.config_dir}/epilog.d"):
+        ilib.directory(f"{s.config_dir}/epilog.d", owner=s.slurm_user, group=s.slurm_grp)
+
+
+    # Setting health_interval to 0 disables healthchecks
+    health_interval = 0
+    health_program = '""'
+    if s.enable_healthchecks:
+        # Run background checks every 1 minute
+        health_interval = 60
+        health_program = f"{s.config_dir}/health.sh"
+        epilog_program = f"{s.config_dir}/epilog.d/99-health_epilog.sh"
+        ilib.copy_file("/etc/healthagent/health.sh.example", health_program, owner="root", group="root", mode=755)
+        ilib.copy_file("/etc/healthagent/epilog.sh.example", epilog_program, owner="root", group="root", mode=755)
+
     ilib.template(
         f"{s.config_dir}/slurm.conf",
         owner=s.slurm_user,
@@ -386,8 +441,29 @@ def _complete_install_primary(s: InstallSettings) -> None:
             "cluster_name": s.slurm_cluster_name,
             "max_node_count": s.max_node_count,
             "state_save_location": state_save_location,
+            "prolog": "/etc/slurm/prolog.d/*",
+            "epilog": "/etc/slurm/epilog.d/*",
+            "launch_parameters" : s.launch_parameters,
+            "health_interval": health_interval,
+            "health_program": health_program
         },
     )
+
+    ilib.copy_file(
+        "imex_prolog.sh",
+        f"{s.config_dir}/prolog.d/imex_prolog.sh",
+        owner="root",
+        group="root",
+        mode="0755",
+        )
+    
+    ilib.copy_file(
+        "imex_epilog.sh",
+        f"{s.config_dir}/epilog.d/imex_epilog.sh",
+        owner="root",
+        group="root",
+        mode="0755",
+        )
 
     if secondary_scheduler:
         ilib.append_file(
@@ -426,8 +502,9 @@ def _complete_install_primary(s: InstallSettings) -> None:
             owner=s.slurm_user,
             group=s.slurm_grp,
             mode="0644",
-            content="# Do not edit this file. It is managed by azslurm",
+            content="# Do not edit this file. It is managed by azslurmd",
         )
+
 
     if not os.path.exists(f"{s.config_dir}/gres.conf"):
         ilib.file(
@@ -437,6 +514,25 @@ def _complete_install_primary(s: InstallSettings) -> None:
             mode="0644",
             content="",
         )
+
+    if not os.path.exists(f"{s.config_dir}/plugstack.conf"):
+        ilib.file(
+            f"{s.config_dir}/plugstack.conf",
+            owner=s.slurm_user,
+            group=s.slurm_grp,
+            mode="0644",
+            content=f"include /etc/slurm/plugstack.conf.d/*"
+        )
+    if not os.path.exists(f"{s.config_dir}/topology.conf"):
+        ilib.file(
+            f"{s.config_dir}/topology.conf",
+            owner=s.slurm_user,
+            group=s.slurm_grp,
+            mode="0644",
+            content=""
+        )
+
+    
 
 def _complete_install_all(s: InstallSettings) -> None:
     ilib.link(
@@ -473,6 +569,42 @@ def _complete_install_all(s: InstallSettings) -> None:
         owner=s.slurm_user,
         group=s.slurm_grp,
     )
+
+    ilib.link(
+        f"{s.config_dir}/plugstack.conf",
+        "/etc/slurm/plugstack.conf",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+    )
+
+    ilib.link(
+        f"{s.config_dir}/topology.conf",
+        "/etc/slurm/topology.conf",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+    )
+
+    ilib.link(
+        f"{s.config_dir}/prolog.d",
+        "/etc/slurm/prolog.d",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+    )
+
+    ilib.link(
+        f"{s.config_dir}/epilog.d",
+        "/etc/slurm/epilog.d",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+    )
+
+    if not os.path.exists("/etc/slurm/plugstack.conf.d"):
+        os.makedirs("/etc/slurm/plugstack.conf.d")
+        ilib.directory("/etc/slurm/plugstack.conf.d",
+                       owner=s.slurm_user,
+                       group=s.slurm_grp,
+        )
+
 
     # Link the accounting.conf regardless
     ilib.link(
@@ -522,6 +654,13 @@ def _complete_install_all(s: InstallSettings) -> None:
         owner="root",
         group="root",
         mode=644,
+    )
+    ilib.copy_file(
+        source="capture_logs.sh",
+        dest="/opt/cycle/capture_logs.sh",
+        owner="root",
+        group="root",
+        mode=755
     )
 
 def get_gres_count(hostname):
@@ -629,6 +768,37 @@ def _load_config(bootstrap_config: str) -> Dict:
 
     return config
 
+def detect_platform() -> str:
+    """
+    Detects Os Platform
+    """
+    id_val = ""
+    id_like_val = ""
+    platform_map = {
+        "ubuntu": "ubuntu",
+        "debian": "ubuntu",
+        "almalinux": "rhel",
+        "centos": "rhel",
+        "fedora": "rhel",
+        "rhel": "rhel",
+        "suse": "suse",
+        "sles": "suse",
+        "sle_hpc": "suse"
+    }
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("ID="):
+                    id_val = line.strip().split("=", 1)[1].strip('"').lower()
+                elif line.startswith("ID_LIKE="):
+                    id_like_val = line.strip().split("=", 1)[1].strip('"').lower()
+    except Exception:
+        return "unknown"
+
+    for key, val in platform_map.items():
+        if key in id_val or key in id_like_val:
+            return val
+    return "unknown"
 
 def main() -> None:
     # needed to set slurmctld only
@@ -637,7 +807,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--platform", default="rhel", choices=["rhel", "ubuntu", "suse", "debian"]
+        "--platform", default=detect_platform(), choices=["rhel", "ubuntu", "suse", "debian"], required=False
     )
     parser.add_argument(
         "--mode", default="scheduler", choices=["scheduler", "execute", "login"]
@@ -645,9 +815,6 @@ def main() -> None:
     parser.add_argument("--bootstrap-config", default="jetpack")
 
     args = parser.parse_args()
-
-    if args.platform == "debian":
-        args.platform = "ubuntu"
 
     config = _load_config(args.bootstrap_config)
     settings = InstallSettings(config, args.platform, args.mode)

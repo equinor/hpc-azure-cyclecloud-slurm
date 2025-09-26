@@ -5,7 +5,7 @@ Cyclecloud Slurm
 This project sets up an auto-scaling Slurm cluster
 Slurm is a highly configurable open source workload manager. See the [Slurm project site](https://www.schedmd.com/) for an overview.
 # Table of Contents:
-1. [Managing Slurm Clusters in 4.0.0](#managing-slurm-clusters)
+1. [Managing Slurm Clusters in 4.0.3](#managing-slurm-clusters)
     1. [Making Cluster Changes](#making-cluster-changes)
     2. [No longer pre-creating execute nodes](#no-longer-pre-creating-execute-nodes)
     3. [Creating additional partitions](#creating-additional-partitions)
@@ -17,6 +17,8 @@ Slurm is a highly configurable open source workload manager. See the [Slurm proj
         1. [AzureCA.pem and existing MariaDB/MySQL instances](#azurecapem-and-existing-mariadbmysql-instances)
     9. [Cost Reporting](#cost-reporting)
     10. [Topology](#topology)
+    11. [GB200 IMEX Support](#gb200-imex-support) 
+    12. [Setting KeepAlive in CycleCloud](#setting-keepalive)
 2. [Supported Slurm and PMIX versions](#supported-slurm-and-pmix-versions)
 3. [Packaging](#packaging)
     1. [Supported OS and PMC Repos](#supported-os-and-pmc-repos)
@@ -24,13 +26,14 @@ Slurm is a highly configurable open source workload manager. See the [Slurm proj
     1. [UID conflicts for Slurm and Munge users](#uid-conflicts-for-slurm-and-munge-users)
     2. [Incorrect number of GPUs](#incorrect-number-of-gpus)
     3. [Dampening Memory](#dampening-memory)
-    4. [KeepAlive set in CycleCloud and Zombie nodes](#keepalive-set-in-cyclecloud-and-zombie-nodes)
+    4. [Pre:4.0.3: KeepAlive set in CycleCloud and Zombie nodes](#keepalive-set-in-cyclecloud-and-zombie-nodes)
     5. [Transitioning from 2.7 to 3.0](#transitioning-from-27-to-30)
     6. [Transitioning from 3.0 to 4.0](#transitioning-from-30-to-40)
     7. [Ubuntu 22 or greater and DNS hostname resolution](#ubuntu-22-or-greater-and-dns-hostname-resolution)
+    8. [Capturing logs and configuration for troubleshooting] ()
 5. [Contributing](#contributing)
 ---
-## Managing Slurm Clusters in 4.0.0
+## Managing Slurm Clusters in 4.0.3
 
 ### Making Cluster Changes
 The Slurm cluster deployed in CycleCloud contains a cli called `azslurm` which facilitates this. After making any changes to the cluster, run the following command as root on the Slurm scheduler node to rebuild the `azure.conf` and update the nodes in the cluster:
@@ -65,7 +68,7 @@ The default template that ships with Azure CycleCloud has three partitions (`hpc
       # (The example here shows the default for an NVidia sku with 8 GPUs)
       # slurm.gpu_device_config = /dev/nvidia[0-7]
 
-      [[[cluster-init cyclecloud/slurm:execute:4.0.0]]]
+      [[[cluster-init cyclecloud/slurm:execute:4.0.3]]]
       [[[network-interface eth0]]]
       AssociatePublicIpAddress = $ExecuteNodesPublic
 ```
@@ -224,11 +227,13 @@ Formatting is only available for jobs and not for partition and partition_hourly
 Do note: `azslurm cost` relies on slurm's admincomment feature to associate specific vm_size and meter info for jobs.
 
 ### Topology
-`azslurm` in slurm 4.0 project upgrades `azslurm generate_topology` to `azslurm topology` to generate the topology plugin configuration for slurm either using VMSS topology or a fabric manager that has SHARP enabled.
+`azslurm` in slurm 4.0 project upgrades `azslurm generate_topology` to `azslurm topology` to generate the [topology plugin configuration](https://slurm.schedmd.com/topology.html) for slurm either using VMSS topology, a fabric manager that has SHARP enabled, or the NVLink Domain. `azslurm topology` can generate both tree and block topology plugin configurations for Slurm. Users may use `azslurm topology` to generate the topology file but must manually add it to `/etc/slurm/topology.conf` either by giving that as the output file or copying the file over. Additionally, users must specify `topologyType=tree|block` in `slurm.conf` for full functionality.
+
+Note: `azslurm topology` is only useful in manually scaled clusters or clusters of fixed size. Autoscaling does not take topology into account and topology is not updated on autoscale.
 
 ```
 usage: azslurm topology [-h] [--config CONFIG] [-p, PARTITION] [-o OUTPUT]
-                        [-v | -f]
+                        [-v | -f | -n] [-b | -t] [-s BLOCK_SIZE]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -237,13 +242,29 @@ optional arguments:
                         Specify the parititon
   -o OUTPUT, --output OUTPUT
                         Specify slurm topology file output
-  -v, --use_vmss        Use VMSS (default: True)
+  -v, --use_vmss        Use VMSS to map Tree or Block topology along VMSS
+                        boundaries without special network consideration
+                        (default: True)
   -f, --use_fabric_manager
-                        Use Fabric Manager (default: False)
+                        Use Fabric Manager to map Tree topology (Block
+                        topology not allowed) according to SHARP network
+                        topology tool(default: False)
+  -n, --use_nvlink_domain
+                        Use NVlink domain to map Block topology (Tree topology
+                        not allowed) according to NVLink Domain and Partition
+                        for multi-node NVLink (default: False)
+  -b, --block           Generate Block Topology output to use Block topology
+                        plugin (default: False)
+  -t, --tree            Generate Tree Topology output to use Tree topology
+                        plugin(default: False)
+  -s BLOCK_SIZE, --block_size BLOCK_SIZE
+                        Minimum block size required for each block (use with
+                        --block or --use_nvlink_domain, default: 1)
 ```
-To generate slurm topology using VMSS:
+To generate slurm topology using VMSS you may optionally specify the type of topology which is defaulted as tree:
 ```
 azslurm topology
+azslurm topology -v -t
 azslurm topology -o topology.conf
 ```
 This will print out a the topology in the tree plugin format slurm wants for topology.conf or create a file based on the output file given in the cli
@@ -252,9 +273,10 @@ This will print out a the topology in the tree plugin format slurm wants for top
 SwitchName=htc Nodes=cluster-htc-1,cluster-htc-2,cluster-htc-3,cluster-htc-4,cluster-htc-5,cluster-htc-6,cluster-htc-7,cluster-htc-8,cluster-htc-9,cluster-htc-10,cluster-htc-11,cluster-htc-12,cluster-htc-13,cluster-htc-14,cluster-htc-15,cluster-htc-16,cluster-htc-17,cluster-htc-18,cluster-htc-19,cluster-htc-20,cluster-htc-21,cluster-htc-22,cluster-htc-23,cluster-htc-24,cluster-htc-25,cluster-htc-26,cluster-htc-27,cluster-htc-28,cluster-htc-29,cluster-htc-30,cluster-htc-31,cluster-htc-32,cluster-htc-33,cluster-htc-34,cluster-htc-35,cluster-htc-36,cluster-htc-37,cluster-htc-38,cluster-htc-39,cluster-htc-40,cluster-htc-41,cluster-htc-42,cluster-htc-43,cluster-htc-44,cluster-htc-45,cluster-htc-46,cluster-htc-47,cluster-htc-48,cluster-htc-49,cluster-htc-50
 SwitchName=Standard_F2s_v2_pg0 Nodes=cluster-hpc-1,cluster-hpc-10,cluster-hpc-11,cluster-hpc-12,cluster-hpc-13,cluster-hpc-14,cluster-hpc-15,cluster-hpc-16,cluster-hpc-2,cluster-hpc-3,cluster-hpc-4,cluster-hpc-5,cluster-hpc-6,cluster-hpc-7,cluster-hpc-8,cluster-hpc-9
 ```
-To generate slurm topology using Fabric Manager you need a SHARP enabled cluster and it is required you specify a partition:
+To generate slurm topology using Fabric Manager you need a SHARP enabled cluster and it is required you specify a partition and you may optionally specify tree plugin which is the default:
 ```
 azslurm topology -f -p gpu
+azslurm topology -f -p gpu -t
 azslurm topology -f -p gpu -o topology.conf
 ```
 ```
@@ -274,9 +296,49 @@ SwitchName=sw02 Nodes=ccw-gpu-192
 
 SwitchName=sw03 Nodes=ccw-gpu-13,ccw-gpu-142,ccw-gpu-26,ccw-gpu-136,ccw-gpu-163,ccw-gpu-138,ccw-gpu-187,ccw-gpu-88
 ```
-This either prints out the topology in slurm topology format or creates an output file with the topology
+This either prints out the topology in slurm topology format or creates an output file with the topology.
+
+To generate slurm topology using NVLink Domain, you need to specifiy a partition and optionally specify a minimum block size (Default 1) as well as the block option which is the default :
+```
+azslurm topology -n -p gpu
+azslurm topology -n -p gpu -b -s 5
+azslurm topology -n -p gpu -b -s 5 -o topology.conf
+```
+```
+# Number of Nodes in block1: 18
+# ClusterUUID and CliqueID: b78ed242-7b98-426f-b194-b76b8899f4ec 32766
+BlockName=block1 Nodes=ccw-1-3-gpu-21,ccw-1-3-gpu-407,ccw-1-3-gpu-333,ccw-1-3-gpu-60,ccw-1-3-gpu-387,ccw-1-3-gpu-145,ccw-1-3-gpu-190,ccw-1-3-gpu-205,ccw-1-3-gpu-115,ccw-1-3-gpu-236,ccw-1-3-gpu-164,ccw-1-3-gpu-180,ccw-1-3-gpu-195,ccw-1-3-gpu-438,ccw-1-3-gpu-305,ccw-1-3-gpu-255,ccw-1-3-gpu-14,ccw-1-3-gpu-400
+# Number of Nodes in block2: 16
+# ClusterUUID and CliqueID: cc79d754-915f-408b-b1c3-b8c3aa6668ab 32766
+BlockName=block2 Nodes=ccw-1-3-gpu-464,ccw-1-3-gpu-7,ccw-1-3-gpu-454,ccw-1-3-gpu-344,ccw-1-3-gpu-91,ccw-1-3-gpu-217,ccw-1-3-gpu-324,ccw-1-3-gpu-43,ccw-1-3-gpu-188,ccw-1-3-gpu-97,ccw-1-3-gpu-434,ccw-1-3-gpu-172,ccw-1-3-gpu-153,ccw-1-3-gpu-277,ccw-1-3-gpu-147,ccw-1-3-gpu-354
+# Number of Nodes in block3: 8
+# ClusterUUID and CliqueID: 0e568355-d588-4a53-8166-8200c2c1ef55 32766
+BlockName=block3 Nodes=ccw-1-3-gpu-31,ccw-1-3-gpu-52,ccw-1-3-gpu-297,ccw-1-3-gpu-319,ccw-1-3-gpu-349,ccw-1-3-gpu-62,ccw-1-3-gpu-394,ccw-1-3-gpu-122
+# Number of Nodes in block4: 9
+# ClusterUUID and CliqueID: e3656d04-00db-4ad6-9a42-5df790994e41 32766
+BlockName=block4 Nodes=ccw-1-3-gpu-5,ccw-1-3-gpu-17,ccw-1-3-gpu-254,ccw-1-3-gpu-284,ccw-1-3-gpu-249,ccw-1-3-gpu-37,ccw-1-3-gpu-229,ccw-1-3-gpu-109,ccw-1-3-gpu-294
+BlockSizes=5
+```
+This either prints out the topology in slurm topology format or creates an output file with the topology.
+
+
+### GB200 IMEX Support
+Cyclecloud Slurm clusters now include prolog and epilog scripts to enable and cleanup IMEX service on a per-job basis. The prolog script will attempt to kill an existing IMEX service before configuring a new instance that will be specific to the new, submitted job. The epilog script terminates the IMEX service. By default, these scripts will run for GB200 nodes and not run for non-GB200 nodes. A configurable parameter `slurm.imex.enabled` has been added to the slurm cluster configuration template to allow non-GB200 nodes to enable IMEX support for their jobs or allow GB200 nodes to disable IMEX support for their jobs.
+```
+#Parameter to enable or disable IMEX service on a per-job basis
+        slurm.imex.enabled=True
+                or
+        slurm.imex.enabled=False
+``` 
+
+
+### Setting KeepAlive
+Added in 4.0.3: If the KeepAlive attribute is set in the CycleCloud UI, then the azslurmd will add that node's name to the `SuspendExcNodes` attribute via scontrol. Note that it is required that `ReconfigFlags=KeepPowerSaveSettings` is set in the slurm.conf, as is the default as of 4.0.3. Once KeepALive is set back to false, `azslurmd` will then remove this node from `SuspendExcNodes`.
+
+If a node is added to `SuspendExcNodes` either via `azslurm keep_alive` or via the scontrol command, then `azslurmd` will not remove this node from the `SuspendExcNodes` if KeepAlive is false in CycleCloud. However, if the node is later set to KeepAlive as true in the UI then `azslurmd` will then remove it from `SuspendExcNodes` when the node is set back to KeepAlive is false.  
+
 ## Supported Slurm and PMIX versions
-The current slurm versions supported are `24.11.3` and `24.05.6`. Both are compiled with PMIX version `4.2.9`.
+The current slurm version supported is `25.05.2` which is compiled with PMIX version `4.2.9`.
 ## Packaging
 Slurm and PMIX packages are fetched and downloaded exclusively from packages.microsoft.com.
 ### Supported OS and PMC Repos
@@ -428,6 +490,17 @@ Due to an issue with the underlying DNS registration scheme that is used across 
       slurm.ubuntu22_waagent_fix = false
 ```
 In future releases, this mitigation will be disabled by default when the issue is resolved in `waagent`.
+
+### Capturing logs and configuration data for troubleshooting
+
+When diagnosing/troubleshooting issues in Slurm clusters orchestrated by CycleCloud, Please use the following convenience script provided for capturing logs and configuration data from any node that needs to be examined by Microsoft engineers.
+This script can be run on any scheduler/login/execute node. But it must be run on all the nodes whose logs/data needs to be captured.
+
+```bash
+/opt/cycle/capture_logs.sh
+```
+
+This should produce a tarball file which should be sent over in support cases.
 
 # Contributing
 

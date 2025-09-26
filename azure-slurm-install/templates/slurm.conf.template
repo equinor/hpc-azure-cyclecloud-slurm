@@ -25,6 +25,7 @@ SlurmctldParameters=idle_on_node_suspend
 SlurmdDebug=debug
 SlurmdLogFile=/var/log/slurmd/slurmd.log
 DisableRootJobs=No
+LaunchParameters={launch_parameters}
 # TopologyPlugin=topology/tree
 # If you use the TopologyPlugin you likely also want to use our
 # job submit plugin so that your jobs run on a single switch 
@@ -32,7 +33,15 @@ DisableRootJobs=No
 # JobSubmitPlugins=lua
 PrivateData=cloud
 PrologSlurmctld=/opt/azurehpc/slurm/prolog.sh
+Prolog={prolog}
+Epilog={epilog}
+# This flag executes prolog scripts on job allocation rather than first task/step launch.
+# It does not change how a prolog script is run but runs it earlier.
+# This flag is also required for GB200 IMEX integration.
+# Recommended to keep this on.
+PrologFlags=alloc
 TreeWidth=65533
+ReconfigFlags=KeepPowerSaveSettings
 ResumeTimeout=1800
 SuspendTimeout=600
 SuspendTime=300
@@ -42,14 +51,25 @@ SuspendProgram=/opt/azurehpc/slurm/suspend_program.sh
 SchedulerParameters=max_switch_wait=24:00:00
 # Only used with dynamic node partitions. 
 MaxNodeCount={max_node_count}
+
+## Node HealthChecks related  configurations
+
+## The interval in seconds between executions of HealthCheckProgram. Setting the value to zero disables execution.
+HealthCheckInterval={health_interval}
+## Identify what node states should execute the HealthCheckProgram. Multiple state values may be specified with a comma separator. The default value is ANY to execute on nodes in any state
+HealthCheckNodeState=ANY
+## Fully qualified pathname of a script to execute as user root periodically on all compute nodes that are not in the NOT_RESPONDING state.
+HealthCheckProgram={health_program}
+
+
 # This as the partition definitions managed by azslurm partitions > /sched/azure.conf
 Include azure.conf
 # If slurm.accounting.enabled=true this will setup slurmdbd
 # otherwise it will just define accounting_storage/none as the plugin
 Include accounting.conf
-# SuspendExcNodes is managed in /etc/slurm/keep_alive.conf
-# see azslurm keep_alive for more information.
-# you can also remove this import to remove support for azslurm keep_alive
+# SuspendExcNodes is persisted to /etc/slurm/keep_alive.conf
+# via azlurmd. There can be up to a 15 second delay.
+# Note this is a work around until ReconfigFlags=KeepPowerSaveSettings is fixed in slurm.
 Include keep_alive.conf
 
 SlurmCtldHost={slurmctldhost}

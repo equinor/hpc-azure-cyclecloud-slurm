@@ -9,8 +9,13 @@ import time
 import traceback
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
-
+from pssh.clients.ssh import ParallelSSHClient, SSHClient
+from pssh.exceptions import Timeout
+import pwd
+import grp
 from . import AzureSlurmError, custom_chaos_mode
+
+from typing import Literal
 
 
 class SrunExitCodeException(Exception):
@@ -32,7 +37,7 @@ class NativeSlurmCLI(ABC):
         ...
 
     @abstractmethod
-    def srun(self, hostname: List[str], user_command: str, timeout: int, shell: bool, partition: str) -> SrunOutput:
+    def srun(self, hostlist: List[str], user_command: str, timeout: int, shell: bool, partition: str, gpus: int) -> SrunOutput:
         ...
 
 class NativeSlurmCLIImpl(NativeSlurmCLI):
@@ -43,15 +48,25 @@ class NativeSlurmCLIImpl(NativeSlurmCLI):
             return retry_subprocess(lambda: check_output(full_args)).strip()
         return check_output(full_args).strip()
 
-    def srun(self, hostlist: List[str], user_command: str, timeout: int, shell: bool, partition: str) -> SrunOutput:
+    def srun(self, hostlist: List[str], user_command: str, timeout: int, shell: bool, partition: str, gpus: int) -> SrunOutput:
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             temp_file_path = temp_file.name
 
             try:
-                command = f"bash -c '{user_command}'" if shell else user_command
-                partition_flag = f"-p {partition} " if partition else ""
+                args = []
+                args.append("srun")
+                if partition:
+                    args.append(f"-p {partition}")
+                args.append(f"-w {','.join(hostlist)}")
+                if gpus:
+                    args.append(f"--gpus={gpus}")
+                args.append(f"--error={temp_file_path}")
                 #adding deadline timeout 1 minute more than the srun timeout to avoid deadline timeout before srun can finish running
-                srun_command = f"srun {partition_flag}-w {','.join(hostlist)} --error {temp_file_path} --deadline=now+{timeout+1}minute --time={timeout} {command}"
+                args.append(f"--deadline=now+{timeout+1}minute")
+                args.append(f"--time={timeout}")
+                command = f"bash -c '{user_command}'" if shell else user_command
+                args.append(command)
+                srun_command = " ".join(args)
                 logging.debug(srun_command)
                 #subprocess timeout is in seconds, so we need to convert the timeout to seconds
                 #add 3 minutes to it so it doesnt timeout before the srun command can kill the job from its own timeout
@@ -81,12 +96,12 @@ def scontrol(args: List[str], retry: bool = True) -> str:
     assert args[0] != "scontrol"
     return SLURM_CLI.scontrol(args, retry)
 
-def srun(hostlist: List[str], user_command: str, timeout: int = 2, shell: bool = False, partition: str = None) -> SrunOutput:
+def srun(hostlist: List[str], user_command: str, timeout: int = 2, shell: bool = False, partition: str = None, gpus: int = None) -> SrunOutput:
     #srun --time option is in minutes and needs atleast 1 minute to run
     assert timeout >= 1
     assert hostlist != None
     assert user_command != None
-    return SLURM_CLI.srun(hostlist, user_command, timeout=timeout, shell=shell, partition=partition)
+    return SLURM_CLI.srun(hostlist, user_command, timeout=timeout, shell=shell, partition=partition, gpus=gpus)
 
 TEST_MODE = False
 def is_slurmctld_up() -> bool:
@@ -99,14 +114,51 @@ def is_slurmctld_up() -> bool:
         return False
 
 
+UpdateT = Literal['add', 'remove', 'set']
+def update_suspend_exc_nodes(action: UpdateT, nodes: str) -> None:
+    assignment = "="
+    if action == "set":
+        assignment = "="
+    elif action == "remove":
+        assignment = "-="
+    else:
+        assignment = "+="
+    scontrol(["update", f"suspendexcnodes{assignment}{nodes}"])
+
+
+def get_current_suspend_exc_nodes() -> List[str]:
+    lines = scontrol(["show", "config"]).splitlines()
+    for line in lines:
+        line = line.lower()
+        if line.startswith("suspendexcnodes"):
+            _, node_list = line.split("=", 1)
+            return from_hostlist(node_list)
+    return []
+
+# Can be adjusted via ENV here, in case even 500 is too large for max args limits.
+MAX_NODES_IN_LIST = int(os.getenv("AZSLURM_MAX_NODES_IN_LIST", 500))
 def show_nodes(node_list: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    return _show_nodes(node_list, MAX_NODES_IN_LIST)
+
+
+def _show_nodes(node_list: Optional[List[str]], max_nodes_in_list: int) -> List[Dict[str, Any]]:
     args = ["show", "nodes"]
     if not is_autoscale_enabled():
         args.append("--future")
-    if node_list:
-        args.append(",".join(node_list))
-    stdout = scontrol(args)
-    return parse_show_nodes(stdout)
+
+    if not node_list:
+        stdout = scontrol(args)
+        return parse_show_nodes(stdout)
+    
+    # Break up names, so we don't hit max arg length limits.
+    ret = []
+    for x in range(0, len(node_list), MAX_NODES_IN_LIST):
+        sub_list = node_list[x: x + MAX_NODES_IN_LIST]
+        if sub_list:
+            sub_args = args + [",".join(sub_list)]
+            stdout = scontrol(sub_args)
+            ret.extend(parse_show_nodes(stdout))
+    return ret
 
 
 def parse_show_nodes(stdout: str) -> List[Dict[str, Any]]:
@@ -131,29 +183,50 @@ def parse_show_nodes(stdout: str) -> List[Dict[str, Any]]:
 
 
 def to_hostlist(nodes: Union[str, List[str]], scontrol_func: Callable=scontrol) -> str:
+    return _to_hostlist(nodes, scontrol_func=scontrol, max_nodes_in_list=MAX_NODES_IN_LIST)
+
+
+def _to_hostlist(nodes: Union[str, List[str]], scontrol_func: Callable=scontrol, max_nodes_in_list: int=MAX_NODES_IN_LIST) -> str:
     """
     convert name-[1-5] into name-1 name-2 name-3 name-4 name-5
     """
     assert nodes
     for n in nodes:
         assert n
+    
     if isinstance(nodes, list):
         nodes_str = ",".join(nodes)
     else:
         nodes_str = nodes
     # prevent poor sorting of nodes and getting node lists like htc-1,htc-10-19, htc-2, htc-20-29 etc
     sorted_nodes = sorted(nodes_str.split(","), key=get_sort_key_func(is_hpc=False))
-    nodes_str = ",".join(sorted_nodes)
-    return scontrol_func(["show", "hostlist", nodes_str])
+    ret = []
+    for i in range(0, len(sorted_nodes), max_nodes_in_list):
+
+        nodes_str = ",".join(sorted_nodes[i: i + max_nodes_in_list])
+        ret.append(scontrol_func(["show", "hostlist", nodes_str]))
+    return ",".join(ret)
 
 
 def from_hostlist(hostlist_expr: str) -> List[str]:
+    return _from_hostlist(hostlist_expr, MAX_NODES_IN_LIST)
+
+
+def _from_hostlist(hostlist_expr: str, max_nodes_in_list: int) -> List[str]:
     """
     convert name-1,name-2,name-3,name-4,name-5 into name-[1-5]
     """
     assert isinstance(hostlist_expr, str)
-    stdout = scontrol(["show", "hostnames", hostlist_expr])
-    return [x.strip() for x in stdout.split()]
+
+    sub_exprs = hostlist_expr.split(",")
+    ret = []
+    for i in range(0, len(sub_exprs), max_nodes_in_list):
+        sub_expr = ",".join(sub_exprs[i: i + max_nodes_in_list])
+        if not sub_expr:
+            continue
+        stdout = scontrol(["show", "hostnames", sub_expr])
+        ret.extend([x.strip() for x in stdout.split()])
+    return ret
 
 
 def run(args: list, stdout=subprocesslib.PIPE, stderr=subprocesslib.PIPE, timeout=120, shell=False, check=True, universal_newlines=True, **kwargs):
@@ -176,6 +249,60 @@ def run(args: list, stdout=subprocesslib.PIPE, stderr=subprocesslib.PIPE, timeou
         logging.error(e)
         raise
     return output
+
+def run_parallel_cmd(hosts, cmd):
+    """
+    Run a command in parallel on a list of hosts using SSH as an interactive user from the 'cyclecloud' group.
+    This function determines the first interactive user (i.e., a user with a valid login shell) in the 'cyclecloud' group,
+    then uses their SSH private key to connect to the specified hosts and execute the given command in parallel.
+        hosts (list): List of hostnames to connect to.
+        cmd (str): Command to execute on each host.
+    Returns:
+        output: Result from ParallelSSHClient.run_command.
+    Raises:
+        ValueError: If the 'cyclecloud' group does not exist or no interactive user is found in the group.
+        TimeoutError: If the command execution times out.
+        Exception: For other errors encountered during execution.
+    """
+    def get_group_users(group_name):
+        try:
+            group_info = grp.getgrnam(group_name)
+        except KeyError:
+            raise ValueError(f"Group '{group_name}' not found.")
+
+        return group_info.gr_mem
+
+    def user_has_login_shell(username):
+        try:
+            pw_entry = pwd.getpwnam(username)
+            shell = pw_entry.pw_shell
+            if shell.endswith('nologin') or shell.endswith('false'):
+                return False
+            return True
+        except KeyError:
+            # user entry not found in /etc/passwd
+            return False
+    try:
+        group_name = "cyclecloud"
+        users_in_group = get_group_users(group_name)
+        interactive_users = [user for user in users_in_group if user_has_login_shell(user)]
+        user = interactive_users[0] if interactive_users else None
+        if not user:
+            raise ValueError(f"No interactive user found in group '{group_name}'.")
+        pw_record = pwd.getpwnam(user)
+        home_dir = pw_record.pw_dir
+        client_kwargs = {"pkey": f"{home_dir}/.ssh/id_rsa"}
+        client_kwargs["user"] = user
+        client_kwargs["timeout"] = 300
+        client = ParallelSSHClient(hosts, **client_kwargs)
+        logging.getLogger("pssh").setLevel(logging.ERROR)
+        output = client.run_command(cmd)
+        client.join(output, timeout=300)
+        return output
+    except Timeout as te:
+        raise Timeout(f"Command timed out: {cmd}. Error: {str(te)}")
+    except Exception as e:
+        raise Exception(f"Error running command: {cmd}: {str(e)}")
 
 def retry_rest(func: Callable, attempts: int = 5) -> Any:
     attempts = max(1, attempts)
