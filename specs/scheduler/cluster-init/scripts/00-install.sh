@@ -12,10 +12,10 @@ find_python3() {
         echo $AZSLURM_PYTHON_PATH
         return 0
     fi
+    #for version in $( seq 20 -1 11 ); do
     for version in $( seq 11 20 ); do
-        which python3.$version
-        if [ $? == 0 ]; then
-            return 0
+        if type -p "python3.$version"; then
+            return 0 # path already printed
         fi
     done
     echo Could not find python3 version 3.11 >&2
@@ -23,8 +23,9 @@ find_python3() {
 }
 
 install_python3() {
-    PYTHON_BIN=find_python3
-    if [ -z "$PYTHON_BIN" ]; then
+    PYTHON_BIN=$( find_python3 )
+    if [ -x "$PYTHON_BIN" ]; then
+        export PYTHON_BIN
         return 0
     fi
     # NOTE: based off of healthagent 00-install.sh, but we have different needs - we don't need the devel/systemd paths.
