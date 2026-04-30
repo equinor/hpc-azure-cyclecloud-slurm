@@ -180,8 +180,9 @@ run_azslurm_exporter() {
 
 ensure_enroot_dir() {
     # In some cases /tmp or even ephemeral disks may clear on reboot.
-    # This ensures the directories are present. its a no-op if they
-    # are already present.
+    # This ensures the cyclecloud-slurm-configured enroot scratch directory is present.
+    # It's a no-op if the directory is already present or if the enroot scratch dir is
+    # not defined in the config file.
     #
     CONF=/etc/enroot/enroot.conf
 
@@ -190,18 +191,17 @@ ensure_enroot_dir() {
         return 0
     fi
 
-    # extract ENROOT_TEMP_PATH value
-    ENROOT_TEMP_PATH=$(awk '$1=="ENROOT_TEMP_PATH"{print $2}' "$CONF")
+    # extract ENROOT_SCRATCH_PATH value
+    ENROOT_SCRATCH_PATH=$(awk '$1=="ENROOT_SCRATCH_PATH"{print $2}' "$CONF")
 
-    # expand command substitutions like $(id -u) if present
-    ENROOT_TEMP_PATH=$(eval echo "$ENROOT_TEMP_PATH")
-
-    # get base directory (two levels up)
-    BASE_DIR=$(dirname "$ENROOT_TEMP_PATH")
-
-    # create base dir and set perms
-    mkdir -p "$BASE_DIR"
-    chmod 1777 "$BASE_DIR"
+    #no op if ENROOT_SCRATCH_PATH is not defined
+    if [ -z "$ENROOT_SCRATCH_PATH" ]; then
+        echo "Warning: ENROOT_SCRATCH_PATH is not defined in $CONF; skipping enroot scratch dir setup."
+        return 0
+    fi
+    # create enroot scratch dir and set perms
+    mkdir -p "$ENROOT_SCRATCH_PATH"
+    chmod 1777 "$ENROOT_SCRATCH_PATH"
 }
 
 { 
