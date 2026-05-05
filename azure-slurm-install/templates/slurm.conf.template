@@ -37,14 +37,15 @@ Prolog={prolog}
 Epilog={epilog}
 # This flag executes prolog scripts on job allocation rather than first task/step launch.
 # It does not change how a prolog script is run but runs it earlier.
-# This flag is also required for GB200 IMEX integration.
+# This flag is also required for GB200/GB300 IMEX integration.
 # Recommended to keep this on.
 PrologFlags=alloc
-TreeWidth=65533
+TreeWidth=16
 ReconfigFlags=KeepPowerSaveSettings
 ResumeTimeout=1800
 SuspendTimeout=600
 SuspendTime=300
+SlurmctldTimeout=30
 ResumeProgram=/opt/azurehpc/slurm/resume_program.sh
 ResumeFailProgram=/opt/azurehpc/slurm/resume_fail_program.sh
 SuspendProgram=/opt/azurehpc/slurm/suspend_program.sh
@@ -71,5 +72,8 @@ Include accounting.conf
 # via azlurmd. There can be up to a 15 second delay.
 # Note this is a work around until ReconfigFlags=KeepPowerSaveSettings is fixed in slurm.
 Include keep_alive.conf
+{auth_alt_type}
+{auth_alt_parameters}
+Include site_specific.conf
 
 SlurmCtldHost={slurmctldhost}

@@ -22,7 +22,6 @@ if [ ! -e $SOURCE/blobs ]; then
     mkdir $SOURCE/blobs
 fi
 
-wget -k -O $SOURCE/azure-slurm-install/AzureCA.pem  https://github.com/Azure/cyclecloud-slurm/releases/download/2.7.3/AzureCA.pem
 # ls slurm/install/slurm-pkgs/*.rpm > /dev/null || (echo you need to run docker-rpmbuild.sh first; exit 1)
 # ls slurm/install/slurm-pkgs/*.deb > /dev/null || (echo you need to run docker-rpmbuild.sh first; exit 1)
 
@@ -36,3 +35,8 @@ cd $SOURCE/azure-slurm
 rm -f dist/*
 ./package.sh $LOCAL_SCALELIB
 mv dist/* ../blobs/
+
+cd $SOURCE/azure-slurm-exporter
+rm -f dist/*
+./package.sh
+mv dist/*.tar.gz ../blobs/

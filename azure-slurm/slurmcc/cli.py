@@ -39,7 +39,7 @@ from . import cost
 from . import topology
 
 
-VERSION = "4.0.3"
+VERSION = "4.0.8"
 
 
 def csv_list(x: str) -> List[str]:
@@ -127,6 +127,26 @@ class SlurmCLI(CommonCLI):
         force: bool = False,
         permanent: bool = False,
     ) -> None:
+        assert False
+
+    @disablecommand
+    def restart_nodes(
+        self,
+        config: Dict,
+        hostnames: List[str],
+        node_names: List[str],
+    ) -> None:
+        """Hidden - use 'azslurm restart' instead"""
+        assert False
+
+    @disablecommand
+    def reimage_nodes(
+        self,
+        config: Dict,
+        hostnames: List[str],
+        node_names: List[str],
+    ) -> None:
+        """Hidden - use 'azslurm reimage' instead"""
         assert False
 
     def _add_completion_data(self, completion_json: Dict) -> None:
@@ -234,6 +254,15 @@ class SlurmCLI(CommonCLI):
         else:
             raise ValueError("Please specify either --use_vmss or --use_fabric_manager or --use_nvlink_domain")
     
+    def version_parser(self, parser: ArgumentParser) -> None:
+        pass
+
+    def version(self, config: Dict) -> None:
+        """
+        Print azslurm version
+        """
+        print(f'azslurm {VERSION}')
+
     def partitions_parser(self, parser: ArgumentParser) -> None:
         parser.add_argument("--allow-empty", action="store_true", default=False)
 
@@ -355,6 +384,36 @@ class SlurmCLI(CommonCLI):
         node_mgr = self._node_mgr(config, self._driver(config))
         self._shutdown(config, node_list=node_list, node_mgr=node_mgr)
 
+    def restart_parser(self, parser: ArgumentParser) -> None:
+        """Parser for Slurm-specific restart command"""
+        parser.set_defaults(read_only=False)
+        parser.add_argument(
+            "-n", "--node-list", type=hostlist, required=True,
+            help="Comma-separated list or hostlist expression of nodes to restart"
+        ).completer = self._slurm_node_name_completer  # type: ignore
+
+    def restart(self, config: Dict, node_list: List[str]) -> None:
+        """
+        Restart nodes via CycleCloud API.
+        """
+        # Call the parent class method with converted arguments
+        super().restart_nodes(config=config, hostnames=[], node_names=node_list)
+
+    def reimage_parser(self, parser: ArgumentParser) -> None:
+        """Parser for Slurm-specific reimage command"""
+        parser.set_defaults(read_only=False)
+        parser.add_argument(
+            "-n", "--node-list", type=hostlist, required=True,
+            help="Comma-separated list or hostlist expression of nodes to reimage"
+        ).completer = self._slurm_node_name_completer  # type: ignore
+
+    def reimage(self, config: Dict, node_list: List[str]) -> None:
+        """
+        Reimage nodes via CycleCloud API.
+        """
+        # Call the parent class method with converted arguments
+        super().reimage_nodes(config=config, hostnames=[], node_names=node_list)
+
     def return_to_idle_parser(self, parser: ArgumentParser) -> None:
         parser.set_defaults(read_only=False)
         parser.add_argument("--terminate-zombie-nodes", action="store_true", default=False)
@@ -365,9 +424,7 @@ class SlurmCLI(CommonCLI):
     ) -> None:
         """
         Nodes that fail to resume in ResumeTimeout seconds will be left
-        in a down~ state - i.e. down and powered_down. It is also possible
-        the nodes will be in a drained~ state, if the node was drained during
-        resume. This command will set those nodes to idle~.
+        in a down~ state - i.e. down and powered_down. This command will set those nodes to idle~.
 
         The one exception is for nodes that have KeepAlive set in CycleCloud.
         Those nodes will be left as down~ and will be logged. When the user
@@ -420,7 +477,7 @@ class SlurmCLI(CommonCLI):
                 continue
             node_name = snode["NodeName"]
 
-            if "DOWN" in slurm_states or "DRAINED" in slurm_states:
+            if "DOWN" in slurm_states:
                 # Only nodes that do not exist in CycleCloud can be set to idle~
                 if node_name not in ccnodes_by_name:
                     to_set_to_idle.append(node_name)
@@ -784,13 +841,17 @@ def _partitions(
         default_yn = "YES" if partition.is_default else "NO"
 
         memory = max(1024, partition.memory)
-
+        # cpus is always a measure of vcpu_count - the only difference is if we
+        # then tell Slurm there are more than one thread per core.
+        # Slurm will always allocate in sets of threads_per_core, so effectively
+        # the result is / 2 for pcpu=true.
+        cpus = partition.vcpu_count
         if partition.use_pcpu:
-            cpus = partition.pcpu_count
             threads = max(1, partition.vcpu_count // partition.pcpu_count)
         else:
-            cpus = partition.vcpu_count
             threads = 1
+        # memory per cpu is always the same - slurm will just aquire 2 cores if pcpu=true
+        # and therefore will also acquire double the memory
         def_mem_per_cpu = memory // cpus
 
         comment_out = ""

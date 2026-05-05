@@ -11,8 +11,8 @@ from argparse import Namespace
 from subprocess import check_call
 from typing import Dict, List, Optional
 
-SCALELIB_VERSION = "1.0.7"
-CYCLECLOUD_API_VERSION = "8.7.1"
+SCALELIB_VERSION = "1.0.10"
+CYCLECLOUD_API_VERSION = "8.8.3"
 
 
 def build_sdist() -> str:
@@ -147,8 +147,10 @@ def execute() -> None:
             assert False
 
     for fil in os.listdir(build_dir):
-        if "pyyaml" in fil.lower():
-            print(f"WARNING: Ignoring unnecessary PyYaml {fil}, also it is platform (ubuntu/rhel) specific.")
+        # Skip platform-specific or unnecessary packages
+        skip_packages = ["pyyaml", "charset_normalizer"]
+        if any(pkg in fil.lower() for pkg in skip_packages):
+            print(f"WARNING: Ignoring unnecessary package {fil}, platform specific or not needed.")
             continue
         path = os.path.join(build_dir, fil)
         _add("packages/" + fil, path)

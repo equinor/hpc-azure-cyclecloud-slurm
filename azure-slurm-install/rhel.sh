@@ -8,27 +8,38 @@ SLURM_ROLE=$1
 SLURM_VERSION=$2
 OS_VERSION=$(cat /etc/os-release  | grep VERSION_ID | cut -d= -f2 | cut -d\" -f2 | cut -d. -f1)
 OS_ID=$(cat /etc/os-release  | grep ^ID= | cut -d= -f2 | cut -d\" -f2 | cut -d. -f1)
+ENROOT_VERSION="4.0.1"
+PYXIS_VERSION="0.21.0"
+PYXIS_DIR="/opt/pyxis"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ARTIFACTS_DIR="$SCRIPT_DIR/artifacts"
 
 if [ "$OS_VERSION" -lt "8" ]; then
     echo "RHEL versions < 8 no longer supported"
     exit 1
 fi
 
-#Almalinux 8/9 and RockyLinux 8/9 both need epel-release to install libjwt for slurm packages 
+# Check if artifacts directory exists
+if [ ! -d "$ARTIFACTS_DIR" ]; then
+    echo "Error: Artifacts directory not found: $ARTIFACTS_DIR"
+    exit 1
+fi
+
+#Almalinux 8/9, RHEL 8/9 and RockyLinux 8/9 both need epel-release to install libjwt for slurm packages
 enable_epel() {
     if ! rpm -qa | grep -q "^epel-release-"; then
         if [ "${OS_ID,,}" == "rhel" ]; then
-            yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_VERSION}.noarch.rpm
+            yum -y install $ARTIFACTS_DIR/epel-release-latest-${OS_VERSION}.noarch.rpm
         else
             yum -y install epel-release
         fi
     fi
-    if [ "${OS_ID}" == "almalinux" ]; then
+    if [[ "${OS_ID}" == "almalinux" || "${OS_ID}" == "rocky" ]]; then
         if [ "$OS_VERSION" == "8" ]; then
-            # Enable powertools repo for AlmaLinux 8 (needed for perl-Switch package)
+            # Enable powertools repo for AlmaLinux 8 and RockyLinux 8 (needed for perl-Switch package)
                 yum config-manager --set-enabled powertools
         else
-            # Enable crb repo for AlmaLinux 9 (needed for perl-Switch package)
+            # Enable crb repo for AlmaLinux 9 and RockyLinux 9 (needed for perl-Switch package)
                 yum config-manager --set-enabled crb
         fi
     fi
@@ -40,7 +51,12 @@ rpm_pkg_install() {
     local pkg_names=$1
     local extra_flags=$2
     for pkg_name in $pkg_names; do
-        if ! rpm -qa | grep -q "^${pkg_name}-"; then
+        base_pkg=$pkg_name
+        if [[ "$pkg_name" == *.rpm ]]; then
+            # Extract package name from .rpm filename
+            base_pkg=$(basename "$pkg_name" | sed 's/-[0-9]*\.el.*$//')
+        fi
+        if ! rpm -qa | grep -q "^${base_pkg}-"; then
             packages_to_install="$packages_to_install $pkg_name"
         fi
     done
@@ -54,7 +70,7 @@ rpm_pkg_install() {
     fi
 }
 
-dependency_packages="perl-Switch munge jq"
+dependency_packages="perl-Switch munge jq jansson-devel libjwt-devel binutils make wget gcc"
 slurm_packages="slurm slurm-libpmi slurm-devel slurm-pam_slurm slurm-perlapi slurm-torque slurm-openlava slurm-example-configs slurm-contribs"
 sched_packages="slurm-slurmctld slurm-slurmdbd slurm-slurmrestd"
 execute_packages="slurm-slurmd"
@@ -106,6 +122,26 @@ done
 enable_epel
 rpm_pkg_install "$dependency_packages"
 rpm_pkg_install "$versioned_slurm_packages" "--disableexcludes slurm"
+
+# Install enroot package
+if [[ "$OS_VERSION" == "8" ]]; then
+    rpm -e --nodeps enroot enroot+caps 2>/dev/null || true
+    arch=$(uname -m)
+    run_file=${ARTIFACTS_DIR}/enroot-check_${ENROOT_VERSION}_$(uname -m).run
+    chmod 755 $run_file
+    $run_file --verify
+    rpm_pkg_install "${ARTIFACTS_DIR}/enroot-${ENROOT_VERSION}-1.el8.${arch}.rpm ${ARTIFACTS_DIR}/enroot+caps-${ENROOT_VERSION}-1.el8.${arch}.rpm"
+fi
+
+# Install pyxis
+if [[ ! -f $PYXIS_DIR/spank_pyxis.so ]]; then
+    tar -xzf ${ARTIFACTS_DIR}/pyxis-${PYXIS_VERSION}.tar.gz
+    cd pyxis-${PYXIS_VERSION}
+    make
+    mkdir -p $PYXIS_DIR
+    cp -fv spank_pyxis.so $PYXIS_DIR
+    chmod +x $PYXIS_DIR/spank_pyxis.so
+fi
 
 touch $INSTALLED_FILE
 exit

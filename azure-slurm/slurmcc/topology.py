@@ -101,7 +101,7 @@ class Topology:
         validate_partition(self.partition)
         partition_cmd = f'-p {self.partition} '
         host_cmd = f'scontrol show hostnames $(sinfo -p {self.partition} -o "%N" -h)'
-        partition_states = "powered_down,powering_up,powering_down,power_down,drain,drained,draining,unknown,down,no_respond,fail,reboot"
+        partition_states = "powered_down,powering_up,powering_down,power_down,unknown,down,no_respond,fail,reboot"
         sinfo_cmd = f'sinfo {partition_cmd}-t {partition_states} -o "%N" -h'
         down_cmd = f'scontrol show hostnames $({sinfo_cmd})'
         hosts=get_hostlist(host_cmd)
@@ -246,6 +246,9 @@ class Topology:
         if os_id=="almalinux":
             log.debug("sharp_cmd_path: /opt/hpcx-v2.18-gcc-mlnx_ofed-redhat8-cuda12-x86_64/")
             return "/opt/hpcx-v2.18-gcc-mlnx_ofed-redhat8-cuda12-x86_64/"
+        if os_id=="rhel":
+            log.debug("sharp_cmd_path: /opt/hpcx-v2.24.1-gcc-inbox-redhat9-cuda12-x86_64/")
+            return "/opt/hpcx-v2.24.1-gcc-inbox-redhat9-cuda12-x86_64/"
         log.error("OS Not supported, exiting")
         sys.exit(1)
 

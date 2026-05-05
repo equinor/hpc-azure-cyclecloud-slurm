@@ -9,9 +9,8 @@ import sys
 import installlib as ilib
 from typing import Dict, Optional
 
-# Legacy: used for connecting to Azure MariaDB, which is deprecated.
-LOCAL_AZURE_CA_PEM = "AzureCA.pem"
-
+# Combined Certs needed to connect to Azure Database for MySQL Server
+COMBINED_CERTS = "AzureCA_4.0.8.pem"
 
 class InstallSettings:
     def __init__(self, config: Dict, platform_family: str, mode: str) -> None:
@@ -21,7 +20,7 @@ class InstallSettings:
             config["slurm"] = {}
 
         if "accounting" not in config["slurm"]:
-            config["slurm"]["acccounting"] = {}
+            config["slurm"]["accounting"] = {}
 
         if "user" not in config["slurm"]:
             config["slurm"]["user"] = {}
@@ -32,9 +31,23 @@ class InstallSettings:
         if "user" not in config["munge"]:
             config["munge"]["user"] = {}
 
+        if "slurmrestd" not in config["slurm"]:
+            config["slurm"]["slurmrestd"] = {}
+
+        if "user" not in config["slurm"]["slurmrestd"]:
+            config["slurm"]["slurmrestd"]["user"] = {}
+
+        if "monitoring" not in config["cyclecloud"]:
+            config["cyclecloud"]["monitoring"] = {}
+
         self.autoscale_dir = (
             config["slurm"].get("autoscale_dir") or "/opt/azurehpc/slurm"
         )
+
+        self.jwt_key_path = (
+            config["slurm"].get("jwt_key_path") or "/var/spool/slurm/statesave/jwt_hs256.key"
+            )
+
         self.cyclecloud_cluster_name = config["cluster_name"]
         # We use a "safe" form of the CycleCloud ClusterName
         # First we lowercase the cluster name, then replace anything
@@ -56,6 +69,9 @@ class InstallSettings:
         self.ipv4 = config["ipaddress"]
         self.slurmver = config["slurm"]["version"]
         self.vm_size = config["azure"]["metadata"]["compute"]["vmSize"]
+        self.version = config["azure"]["metadata"]["compute"]["version"]
+        # Extract major version for comparison (e.g., "8.10.2024101801" -> 8)
+        self.major_version = int(self.version.split('.')[0]) if self.version else 0
 
         self.slurm_user: str = config["slurm"]["user"].get("name") or "slurm"
         self.slurm_grp: str = config["slurm"]["user"].get("group") or "slurm"
@@ -67,12 +83,23 @@ class InstallSettings:
         self.munge_uid: str = config["munge"]["user"].get("uid") or "11101"
         self.munge_gid: str = config["munge"]["user"].get("gid") or "11101"
 
+        self.slurmrestd_user: str = config["slurm"]["slurmrestd"]["user"].get("name") or "slurmrestd"
+        self.slurmrestd_grp: str = config["slurm"]["slurmrestd"]["user"].get("group") or "slurmrestd"
+        self.slurmrestd_uid: str = config["slurm"]["slurmrestd"]["user"].get("uid") or "11102"
+        self.slurmrestd_gid: str = config["slurm"]["slurmrestd"]["user"].get("gid") or "11102"
+
+        self.monitoring_enabled: bool = config["cyclecloud"]["monitoring"].get("enabled", False)
+
+        # JWT authentication requires libjwt library to be installed
+        self.jwt_available: bool = False
+
         self.acct_enabled: bool = config["slurm"]["accounting"].get("enabled", False)
         self.acct_user: Optional[str] = config["slurm"]["accounting"].get("user")
         self.acct_pass: Optional[str] = config["slurm"]["accounting"].get("password")
         self.acct_url: Optional[str] = config["slurm"]["accounting"].get("url")
-        self.acct_cert_url: Optional[str] = config["slurm"]["accounting"].get("certificate_url")
+        self.custom_acct_cert: Optional[str] = config["slurm"]["accounting"].get("certificate")
         self.acct_storageloc :Optional[str] = config["slurm"]["accounting"].get("storageloc")
+        self.acct_cert_filename = "CustomCA.pem" if self.custom_acct_cert else COMBINED_CERTS
 
         self.use_nodename_as_hostname = config["slurm"].get(
             "use_nodename_as_hostname", False
@@ -113,6 +140,15 @@ class InstallSettings:
         self.ubuntu22_waagent_fix = config["slurm"].get("ubuntu22_waagent_fix", True)
         self.enable_healthchecks = config["slurm"].get("enable_healthchecks", True)
 
+        self.healthagent = config["cyclecloud"].get("healthagent", {})
+        if self.healthagent.get("disabled", False) == True:
+            self.enable_healthchecks = False
+
+        if self.platform_family == "suse":
+            logging.warning("Monitoring and healthchecks are not supported on SUSE platforms, disabling configuration.")
+            self.enable_healthchecks = False
+            self.monitoring_enabled = False
+
 
 def _inject_vm_size(dynamic_config: str, vm_size: str) -> str:
 
@@ -139,8 +175,48 @@ def _escape(s: str) -> str:
     return re.sub("[^a-zA-Z0-9-]", "-", s).lower()
 
 
+def check_libjwt(s: InstallSettings) -> None:
+    """
+    Detect if libjwt library is available by checking the dynamic linker cache.
+    Sets s.jwt_available based on the result.
+    """
+    if s.mode != "scheduler":
+        logging.info("Running on non-scheduler node skipping libjwt check.")
+        return
+    
+    try:
+        # Use grep to search ldconfig cache for jwt library
+        result = subprocess.run(
+            "ldconfig -p | grep libjwt",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0:
+            # Found libjwt - log the first match for debugging
+            first_match = result.stdout.splitlines()[0].strip() if result.stdout else "libjwt"
+            logging.info(f"Found libjwt in ldconfig cache: {first_match}")
+            s.jwt_available = True
+        else:
+            logging.info("libjwt not found in ldconfig cache")
+            s.jwt_available = False
+
+    except Exception as e:
+        logging.warning(f"Failed to query ldconfig for libjwt: {e}")
+        s.jwt_available = False
+    if not s.jwt_available:
+        logging.warning(
+            "libjwt library not found after package installation. "
+            "Slurm will use munge-only authentication."
+        )
+    else:
+        logging.info("libjwt library detected, JWT authentication will be configured.")
+
+
 def setup_users(s: InstallSettings) -> None:
-    # Set up users for Slurm and Munge
+    # Set up users for Slurm, Munge and Slurmrestd
     ilib.group(s.slurm_grp, gid=s.slurm_gid)
 
     ilib.user(
@@ -159,6 +235,20 @@ def setup_users(s: InstallSettings) -> None:
         shell="/bin/false",
         uid=s.munge_uid,
         gid=s.munge_gid,
+    )
+    
+    if s.platform_family == "suse":
+        logging.warning("slurmrestd user configuration is not supported on SUSE platforms, skipping this step.")
+        return
+    
+    ilib.group(s.slurmrestd_grp, gid=s.slurmrestd_gid)
+    
+    ilib.user(
+        s.slurmrestd_user,
+        comment="User to run slurmrestd",
+        shell="/usr/sbin/nologin",
+        uid=s.slurmrestd_uid,
+        gid=s.slurmrestd_gid,
     )
 
 
@@ -303,30 +393,25 @@ AccountingStorageTRES=gres/gpu
 """,
     )
 
-    # Previously this was required when connecting to any Azure MariaDB instance.
-    # Which is why we shipped with LOCAL_AZURE_CA_PEM.
-    if s.acct_cert_url and s.acct_cert_url != LOCAL_AZURE_CA_PEM:
-        logging.info(f"Downloading {s.acct_cert_url} to {s.config_dir}/AzureCA.pem")
-        subprocess.check_call(
-            [
-                "wget",
-                "-O",
-                f"{s.config_dir}/AzureCA.pem",
-                s.acct_cert_url,
-            ]
-        )
-        ilib.chown(
-            f"{s.config_dir}/AzureCA.pem", owner=s.slurm_user, group=s.slurm_grp
-        )
-        ilib.chmod(f"{s.config_dir}/AzureCA.pem", mode="0600")
-    elif s.acct_cert_url and s.acct_cert_url == LOCAL_AZURE_CA_PEM:
-        ilib.copy_file(
-            LOCAL_AZURE_CA_PEM,
-            f"{s.config_dir}/AzureCA.pem",
+    # Always copy the bundled certificate
+    ilib.copy_file(
+        COMBINED_CERTS,
+        f"{s.config_dir}/{COMBINED_CERTS}",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+        mode="0600",
+    )
+    #Install custom SSL cert if specified
+    if s.custom_acct_cert:
+        cert_path = f"{s.config_dir}/{s.acct_cert_filename}"
+        logging.info(f"Saving custom SSL cert to {cert_path}")
+        ilib.file(
+            cert_path,
             owner=s.slurm_user,
             group=s.slurm_grp,
             mode="0600",
-        )
+            content=s.custom_acct_cert,
+            )
 
     # Configure slurmdbd.conf
     ilib.template(
@@ -340,11 +425,12 @@ AccountingStorageTRES=gres/gpu
             "dbuser": s.acct_user or "root",
             "dbdhost": s.hostname,
             "storagepass": f"StoragePass={s.acct_pass}" if s.acct_pass else "#StoragePass=",
-            "storage_parameters": "StorageParameters=SSL_CA=/etc/slurm/AzureCA.pem"
-                                  if s.acct_cert_url
-                                  else "#StorageParameters=",
+            "storage_parameters": f"StorageParameters=SSL_CA=/etc/slurm/{s.acct_cert_filename}",
             "slurmver": s.slurmver,
             "storageloc": s.acct_storageloc or f"{s.slurm_db_cluster_name}_acct_db",
+            "auth_alt_type": "AuthAltTypes=auth/jwt" if s.jwt_available else "",
+            "auth_alt_parameters": f"AuthAltParameters=jwt_key={s.jwt_key_path}"
+                                if s.jwt_available else ""
         },
     )
 
@@ -365,17 +451,21 @@ def _accounting_all(s: InstallSettings) -> None:
     """
     Perform linking and enabling of slurmdbd
     """
-    # This used to be required for all installations, but it is
-    # now optional, so only create the link if required.
-    original_azure_ca_pem = f"{s.config_dir}/AzureCA.pem"
-    if os.path.exists(original_azure_ca_pem):
+    # Always link the bundled certificate to /etc/slurm in addition to user specified custom SSL certificate
+    ilib.link(
+        f"{s.config_dir}/{COMBINED_CERTS}",
+        f"/etc/slurm/{COMBINED_CERTS}",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+    )
+
+    if s.custom_acct_cert:
         ilib.link(
-            f"{s.config_dir}/AzureCA.pem",
-            "/etc/slurm/AzureCA.pem",
+            f"{s.config_dir}/{s.acct_cert_filename}",
+            f"/etc/slurm/{s.acct_cert_filename}",
             owner=s.slurm_user,
             group=s.slurm_grp,
         )
-
     # Link shared slurmdbd.conf to real config file location
     ilib.link(
         f"{s.config_dir}/slurmdbd.conf",
@@ -411,7 +501,7 @@ def _complete_install_primary(s: InstallSettings) -> None:
 
     if not os.path.exists(state_save_location):
         ilib.directory(state_save_location, owner=s.slurm_user, group=s.slurm_grp)
-
+    
     if not os.path.exists(f"{s.config_dir}/prolog.d"):
         ilib.directory(f"{s.config_dir}/prolog.d", owner=s.slurm_user, group=s.slurm_grp)
 
@@ -423,12 +513,15 @@ def _complete_install_primary(s: InstallSettings) -> None:
     health_interval = 0
     health_program = '""'
     if s.enable_healthchecks:
-        # Run background checks every 1 minute
-        health_interval = 60
-        health_program = f"{s.config_dir}/health.sh"
-        epilog_program = f"{s.config_dir}/epilog.d/99-health_epilog.sh"
-        ilib.copy_file("/etc/healthagent/health.sh.example", health_program, owner="root", group="root", mode=755)
-        ilib.copy_file("/etc/healthagent/epilog.sh.example", epilog_program, owner="root", group="root", mode=755)
+        if not os.path.exists("/etc/healthagent"):
+            logging.warning("/etc/healthagent directory does not exist, skipping health check script configuration")
+        else:
+            # Run background checks every 1 minute
+            health_interval = 60
+            health_program = f"{s.config_dir}/health.sh"
+            epilog_program = f"{s.config_dir}/epilog.d/10-health_epilog.sh"
+            ilib.copy_file("/etc/healthagent/health.sh.example", health_program, owner="root", group="root", mode=755)
+            ilib.copy_file("/etc/healthagent/epilog.sh.example", epilog_program, owner="root", group="root", mode=755)
 
     ilib.template(
         f"{s.config_dir}/slurm.conf",
@@ -445,13 +538,21 @@ def _complete_install_primary(s: InstallSettings) -> None:
             "epilog": "/etc/slurm/epilog.d/*",
             "launch_parameters" : s.launch_parameters,
             "health_interval": health_interval,
-            "health_program": health_program
+            "health_program": health_program,
+            "auth_alt_type": "AuthAltTypes=auth/jwt" if s.jwt_available else "",
+            "auth_alt_parameters": f"AuthAltParameters=jwt_key={s.jwt_key_path}"
+                                if s.jwt_available else ""
         },
     )
 
+    ## SLurm Prolog/Epilog guide states:
+    #  When more than one prolog script is configured, they are executed in reverse alphabetical order (z-a -> Z-A -> 9-0).
+    #  Therefore we should make explicit numbering choice on imex prolog/epilog. By marking them 90- - We want them to execute first
+    #  but user can override that choice by putting a script that follows the ordering defined above.
+
     ilib.copy_file(
         "imex_prolog.sh",
-        f"{s.config_dir}/prolog.d/imex_prolog.sh",
+        f"{s.config_dir}/prolog.d/90-imex_prolog.sh",
         owner="root",
         group="root",
         mode="0755",
@@ -459,7 +560,7 @@ def _complete_install_primary(s: InstallSettings) -> None:
     
     ilib.copy_file(
         "imex_epilog.sh",
-        f"{s.config_dir}/epilog.d/imex_epilog.sh",
+        f"{s.config_dir}/epilog.d/90-imex_epilog.sh",
         owner="root",
         group="root",
         mode="0755",
@@ -472,11 +573,20 @@ def _complete_install_primary(s: InstallSettings) -> None:
             comment_prefix="\n# Additional HA scheduler host -",
         )
 
+    if not os.path.exists(f"{s.config_dir}/site_specific.conf"):
+        ilib.file(
+            f"{s.config_dir}/site_specific.conf",
+            owner=s.slurm_user,
+            group=s.slurm_grp,
+            mode="0644",
+            content="# site specific slurm configuration. This is preserved during upgrades",
+        )
+
     if s.additonal_slurm_config:
         ilib.append_file(
             f"{s.config_dir}/slurm.conf",
             content=s.additonal_slurm_config,
-            comment_prefix="\n# Additional config from CycleCloud -",
+            comment_prefix="\n# Additional config from CycleCloud cluster template-",
         )
 
     ilib.template(
@@ -532,8 +642,6 @@ def _complete_install_primary(s: InstallSettings) -> None:
             content=""
         )
 
-    
-
 def _complete_install_all(s: InstallSettings) -> None:
     ilib.link(
         f"{s.config_dir}/gres.conf",
@@ -559,6 +667,13 @@ def _complete_install_all(s: InstallSettings) -> None:
     ilib.link(
         f"{s.config_dir}/azure.conf",
         "/etc/slurm/azure.conf",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+    )
+
+    ilib.link(
+        f"{s.config_dir}/site_specific.conf",
+        "/etc/slurm/site_specific.conf",
         owner=s.slurm_user,
         group=s.slurm_grp,
     )
@@ -605,6 +720,7 @@ def _complete_install_all(s: InstallSettings) -> None:
                        group=s.slurm_grp,
         )
 
+    _configure_enroot_pyxis(s)
 
     # Link the accounting.conf regardless
     ilib.link(
@@ -705,15 +821,206 @@ def setup_slurmd(s: InstallSettings) -> None:
             slurmd_config = slurmd_config + " -b"
 
     ilib.file(
-        "/etc/sysconfig/slurmd" if s.platform_family == "rhel" else "/etc/default/slurmd",
+        "/etc/sysconfig/slurmd" if s.platform_family in ["rhel", "azurelinux"] else "/etc/default/slurmd",
         content=slurmd_config,
         owner=s.slurm_user,
         group=s.slurm_grp,
         mode="0700",
     )
+
+    ilib.directory(
+        "/etc/systemd/system/slurmd.service.d", owner="root", group="root", mode=755
+    )
+
+    ilib.template(
+        "/etc/systemd/system/slurmd.service.d/override.conf",
+        source="templates/slurmd.override",
+        owner="root",
+        group="root",
+        mode=644,
+    )
     ilib.enable_service("slurmd")
 
+def setup_slurmrestd(s: InstallSettings) -> None:
+    if s.mode != "scheduler":
+        logging.info("Running on non-scheduler node skipping this step.")
+        return
+    
+    if s.platform_family == "suse":
+        logging.warning("slurmrestd configuration is not supported on SUSE platforms, skipping this step.")
+        return
+        
+    # Add slurmrestd to docker group
+    try:
+        ilib.group("docker", gid=None)
+        ilib.group_members("docker", members=[s.slurmrestd_user], append=True)
+    except Exception as e:
+        logging.warning(f"Could not add slurmrestd to docker group: {e}")
+    openapi_flag = "" if s.acct_enabled else " -s openapi/slurmctld"
+    slurmrestd_config = f"SLURMRESTD_OPTIONS=\"-u slurmrestd -g slurmrestd{openapi_flag}\"\nSLURMRESTD_LISTEN=:6820,unix:/var/spool/slurmrestd/slurmrestd.socket"
+    ilib.file(
+        "/etc/sysconfig/slurmrestd" if s.platform_family in ["rhel", "azurelinux"] else "/etc/default/slurmrestd",
+        content=slurmrestd_config,
+        owner=s.slurmrestd_user,
+        group=s.slurmrestd_grp,
+        mode="0644",
+    )
+    
+    ilib.directory(
+        "/var/spool/slurmrestd", owner=s.slurmrestd_user, group=s.slurmrestd_grp, mode=755
+    )
+    ilib.file(
+            "/var/spool/slurmrestd/slurmrestd.socket",
+            owner=s.slurm_user,
+            group=s.slurm_grp,
+            mode="0755",
+            content="",
+    )
+    ilib.directory(
+        "/etc/systemd/system/slurmrestd.service.d", owner="root", group="root", mode=755
+    )
 
+    # When libjwt is not available, unset SLURM_JWT to disable JWT authentication
+    jwt_env = "" if s.jwt_available else "UnsetEnvironment=SLURM_JWT"
+
+    ilib.template(
+        "/etc/systemd/system/slurmrestd.service.d/override.conf",
+        source="templates/slurmrestd.override",
+        owner="root",
+        group="root",
+        mode=644,
+        variables={
+            "jwt_env": jwt_env
+        },
+    )
+
+    if s.jwt_available:
+        _configure_jwt_authentication(s)
+
+    ilib.enable_service("slurmrestd")
+
+def _configure_jwt_authentication(s: InstallSettings) -> None:
+    """
+    Configure JWT authentication for Slurm.
+    This function is only called when libjwt is available on the system.
+    """
+    jwt_dir = os.path.dirname(s.jwt_key_path)
+
+    # Create the directory and key file if they don't exist
+    ilib.directory(jwt_dir, owner=s.slurm_user, group=s.slurm_grp, mode=755)
+    ilib.directory(os.path.dirname(jwt_dir), owner=s.slurm_user, group=s.slurm_grp, mode=755)
+
+    if not os.path.exists(s.jwt_key_path):
+        # Generate a 32-byte random key
+        with open("/dev/random", "rb") as fr:
+            key = fr.read(32)
+        ilib.file(s.jwt_key_path, content=key, owner=s.slurm_user, group=s.slurm_grp, mode=600)
+    else:
+        ilib.chown(s.jwt_key_path, owner=s.slurm_user, group=s.slurm_grp)
+        ilib.chmod(s.jwt_key_path, mode=600)
+
+    ilib.chown(jwt_dir, owner=s.slurm_user, group=s.slurm_grp)
+    ilib.chmod(jwt_dir, mode=755)
+    ilib.chmod(os.path.dirname(jwt_dir), mode=755)
+
+def _configure_enroot_pyxis(s: InstallSettings) -> None:
+    if s.platform_family == "suse" or (s.platform_family == "rhel" and s.major_version != 8) or s.platform_family == "azurelinux":
+        logging.warning("Enroot is only supported on Ubuntu and RHEL/AlmaLinux 8. Skipping enroot configuration.")
+        return
+
+    def _get_enroot_scratch_base_dir() -> str:
+        if os.path.exists("/nvme") and ilib.is_mount_point("/nvme"):
+            logging.info("Using /nvme for enroot scratch directory (nvme mount detected)")
+            return "/nvme"
+        elif os.path.exists("/mnt") and ilib.is_mount_point("/mnt"):
+            logging.info("Using /mnt for enroot scratch directory (mnt mount detected)")
+            return "/mnt"
+        else:
+            logging.info("Using /tmp for enroot scratch directory (no suitable mounts found)")
+            return "/tmp"
+
+    # Determine scratch directory based on available mounts
+    scratch_base_dir = _get_enroot_scratch_base_dir()
+    enroot_scratch_dir = f"{scratch_base_dir}/enroot"
+    
+    # Create the enroot directory
+    ilib.directory(enroot_scratch_dir, owner="root", group="root", mode=755)
+
+    # Create enroot subdirectories
+    subdirs = ["enroot-cache", "enroot-data", "enroot-temp", "enroot-runtime", "enroot-run"]
+    for subdir in subdirs:
+        full_path = f"{enroot_scratch_dir}/{subdir}"
+        ilib.directory(full_path, owner="root", group="root", mode=777)
+    
+    ilib.template(
+        f"/etc/enroot/enroot.conf",
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+        mode="0644",
+        source="templates/enroot.conf.template",
+        variables={
+            "ENROOT_SCRATCH_DIR": enroot_scratch_dir
+        },
+    )
+    # Install extra hooks for PMIx on compute nodes
+    if s.mode == "execute":
+        # Ensure hooks directory exists
+        ilib.directory("/etc/enroot/hooks.d", owner="root", group="root", mode=755)
+        
+        # Copy hook files
+        hook_files = ["50-slurm-pmi.sh", "50-slurm-pytorch.sh"]
+        for hook_file in hook_files:
+            source_path = f"/usr/share/enroot/hooks.d/{hook_file}"
+            dest_path = f"/etc/enroot/hooks.d/{hook_file}"
+            
+            if os.path.exists(source_path):
+                ilib.copy_file(
+                    source_path,
+                    dest_path,
+                    owner="root",
+                    group="root",
+                    mode="0755"
+                )
+            else:
+                logging.warning(f"Hook file {source_path} not found, skipping")
+    
+    # Create the pyxis.conf file with the required plugin configuration
+    pyxis_config = f'required /opt/pyxis/spank_pyxis.so runtime_path={enroot_scratch_dir}/enroot-runtime'
+    ilib.file(
+        "/etc/slurm/plugstack.conf.d/pyxis.conf",
+        content=pyxis_config,
+        owner=s.slurm_user,
+        group=s.slurm_grp,
+        mode="0644"
+    )
+
+def _update_prom_config(s: InstallSettings, prom_config: str, host_name: str) -> None:
+    """
+    Update hostnames in Prometheus config targets to be new_hostname
+    """
+    if not s.monitoring_enabled or not os.path.isfile(prom_config):
+        logging.info("Monitoring is not enabled or prometheus config is not found, skipping Prometheus configuration update.")
+        return
+    
+    with open(prom_config, "r") as f:
+        prom_content = f.read()
+
+    # Replace hostnames in targets arrays, keeping the port
+    # Matches: "hostname:port" and replaces hostname with new host_name
+    prom_content = re.sub(r'"([^":]+):(\d+)"', f'"{host_name}:\\2"', prom_content)
+
+    # Also replace the global instance label
+    prom_content = re.sub(r'instance:\s*([^\s\n]+)', f'instance: {host_name}', prom_content)
+
+    # Write back to prom_config
+    ilib.file(
+        prom_config,
+        content=prom_content,
+        owner="root",
+        group="root",
+        mode="0644"
+    )
+    
 def set_hostname(s: InstallSettings) -> None:
     if not s.use_nodename_as_hostname:
         return
@@ -728,6 +1035,10 @@ def set_hostname(s: InstallSettings) -> None:
     ilib.set_hostname(
         new_hostname, s.platform_family, s.ensure_waagent_monitor_hostname
     )
+    
+    #Update prom config with new hostname
+    _update_prom_config(s, "/opt/prometheus/prometheus.yml", new_hostname)
+    
     if _is_at_least_ubuntu22() and s.ubuntu22_waagent_fix:
         logging.warning("Restarting systemd-networkd to fix waagent/hostname issue on Ubuntu 22.04." +
                         " To disable this, set slurm.ubuntu22_waagent_fix=false under this" +
@@ -783,7 +1094,8 @@ def detect_platform() -> str:
         "rhel": "rhel",
         "suse": "suse",
         "sles": "suse",
-        "sle_hpc": "suse"
+        "sle_hpc": "suse",
+        "azurelinux": "azurelinux"
     }
     try:
         with open("/etc/os-release") as f:
@@ -807,7 +1119,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--platform", default=detect_platform(), choices=["rhel", "ubuntu", "suse", "debian"], required=False
+        "--platform", default=detect_platform(), choices=["rhel", "ubuntu", "suse", "debian", "azurelinux"], required=False
     )
     parser.add_argument(
         "--mode", default="scheduler", choices=["scheduler", "execute", "login"]
@@ -825,11 +1137,15 @@ def main() -> None:
     # create the users
     setup_users(settings)
 
+    set_hostname(settings)
     # create the munge key and/or copy it to /etc/munge/
     munge_key(settings)
 
-    # runs either rhel.sh or ubuntu.sh to install the packages
+    # runs either rhel.sh, ubuntu.sh, or azurelinux.sh to install packages or verify the packages are installed
     run_installer(settings, os.path.abspath(f"{args.platform}.sh"), args.mode)
+
+    #check for libjwt to configure JWT auth for slurmrestd
+    check_libjwt(settings)
 
     # various permissions fixes
     fix_permissions(settings)
@@ -838,14 +1154,17 @@ def main() -> None:
 
     if settings.mode == "scheduler":
         accounting(settings)
+        setup_slurmrestd(settings)
         # TODO create a rotate log
         ilib.cron(
             "return_to_idle",
             minute="*/5",
             command=f"{settings.autoscale_dir}/return_to_idle.sh 1>&2 >> {settings.autoscale_dir}/logs/return_to_idle.log",
         )
-
-    set_hostname(settings)
+        if settings.is_primary_scheduler == False:
+            # This is the HA node.
+            logging.info(f"Secondary Scheduler {settings.secondary_scheduler_name} starting wait on primary to finish converging.")
+            ilib.await_node_converge(settings.config, "scheduler", timeout=600)
 
     if settings.mode == "execute":
         setup_slurmd(settings)

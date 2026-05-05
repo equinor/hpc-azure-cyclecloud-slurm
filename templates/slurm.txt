@@ -31,12 +31,14 @@ Autoscale = $Autoscale
         slurm.user.gid = 11100
         munge.user.uid = 11101
         munge.user.gid = 11101
+        slurm.slurmrestd.user.uid = 11102
+        slurm.slurmrestd.user.gid = 11102
         slurm.enable_healthchecks = true
         slurm.accounting.enabled = $configuration_slurm_accounting_enabled
         slurm.accounting.url = $configuration_slurm_accounting_url
         slurm.accounting.user = $configuration_slurm_accounting_user
         slurm.accounting.password = $configuration_slurm_accounting_password
-        slurm.accounting.certificate_url = $configuration_slurm_accounting_certificate_url
+        slurm.accounting.certificate = $configuration_slurm_accounting_custom_certificate
         slurm.accounting.storageloc = $configuration_slurm_accounting_storageloc
         slurm.additional.config = $additional_slurm_config
         slurm.ha_enabled = $configuration_slurm_ha_enabled
@@ -59,13 +61,17 @@ Autoscale = $Autoscale
         cyclecloud.exports.defaults.samba.enabled = false      
         cshared.server.legacy_links_disabled = true
 
+        # Monitoring
+        cyclecloud.monitoring.enabled = $configuration_monitoring_enabled
+        cyclecloud.monitoring.identity_client_id = $configuration_identity_client_id
+        cyclecloud.monitoring.ingestion_endpoint = $configuration_ingestion_endpoint
+
         # May be used to identify the ID in cluster-init scripts
         cluster.identities.default = $ManagedIdentity
 
         [[[cluster-init cyclecloud/healthagent:default]]]
-        [[[cluster-init cyclecloud/slurm:default:4.0.3]]]
-        Optional = true
-        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
+        [[[cluster-init cyclecloud/monitoring:default]]]
+        [[[cluster-init cyclecloud/slurm:default]]]
 
         [[[volume boot]]]
         Size = ${ifThenElse(BootDiskSize > 0, BootDiskSize, undefined)}
@@ -119,8 +125,8 @@ Autoscale = $Autoscale
 
 
         [[[cluster-init cyclecloud/healthagent:default]]]
-        [[[cluster-init cyclecloud/slurm:scheduler:4.0.3]]]
-        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
+        [[[cluster-init cyclecloud/monitoring:default]]]
+        [[[cluster-init cyclecloud/slurm:scheduler]]]
 
         [[[network-interface eth0]]]
         AssociatePublicIpAddress = $UsePublicNetwork
@@ -178,13 +184,14 @@ Autoscale = $Autoscale
 
     [[nodearray login]]
         InitialCount = $NumberLoginNodes
+        MaxCount = $MaxLoginNodeCount
         MachineType = $loginMachineType
         ImageName = $LoginImageName
         AdditionalClusterInitSpecs = $LoginClusterInitSpecs
 
         [[[cluster-init cyclecloud/healthagent:default]]]
-        [[[cluster-init cyclecloud/slurm:login:4.0.3]]]
-        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
+        [[[cluster-init cyclecloud/monitoring:default]]]
+        [[[cluster-init cyclecloud/slurm:login]]]
         [[[configuration]]]
         slurm.role = login
         autoscale.enabled = false
@@ -201,8 +208,8 @@ Autoscale = $Autoscale
         slurm.use_nodename_as_hostname = $NodeNameIsHostname
 
         [[[cluster-init cyclecloud/healthagent:default]]]
-        [[[cluster-init cyclecloud/slurm:execute:4.0.3]]]
-        [[[cluster-init cyclecloud/slurm:pyxis:4.0.3]]]
+        [[[cluster-init cyclecloud/monitoring:default]]]
+        [[[cluster-init cyclecloud/slurm:execute]]]
 
         [[[network-interface eth0]]]
         AssociatePublicIpAddress = $ExecuteNodesPublic
@@ -212,10 +219,11 @@ Autoscale = $Autoscale
     MachineType = $HPCMachineType
     ImageName = $HPCImageName
     MaxCount = $MaxHPCExecuteNodeCount
+    Zone = ${ifThenElse(DefineNodesAvailabilityZone, HPCAvailabilityZone, undefined)}
     Azure.MaxScalesetSize = $HPCMaxScalesetSize
     AdditionalClusterInitSpecs = $HPCClusterInitSpecs
     EnableNodeHealthChecks = $EnableNodeHealthChecks
-
+    
 
         [[[configuration]]]
         slurm.default_partition = true
@@ -227,7 +235,7 @@ Autoscale = $Autoscale
     MachineType = $HTCMachineType
     ImageName = $HTCImageName
     MaxCount = $MaxHTCExecuteNodeCount
-
+    Zone = ${ifThenElse(DefineNodesAvailabilityZone, HTCAvailabilityZone, undefined)}
     Interruptible = $HTCUseLowPrio
     MaxPrice = $HTCSpotMaxPrice
     AdditionalClusterInitSpecs = $HTCClusterInitSpecs
@@ -243,6 +251,7 @@ Autoscale = $Autoscale
     MachineType = $GPUMachineType
     ImageName = $GPUImageName
     MaxCount = $MaxGPUExecuteNodeCount
+    Zone = ${ifThenElse(DefineNodesAvailabilityZone, GPUAvailabilityZone, undefined)}
     Azure.MaxScalesetSize = $HPCMaxScalesetSize
     EnableNodeHealthChecks = $EnableNodeHealthChecks
 
@@ -255,7 +264,7 @@ Autoscale = $Autoscale
         slurm.hpc = true
         slurm.partition = gpu
         #Parameter to enable or disable IMEX service on a per-job basis
-        #IMEX Support is enabled by default for GB200 but can be disabled by setting param to False
+        #IMEX Support is enabled by default for GB200/GB300 but can be disabled by setting param to False
         #slurm.imex.enabled=True
 
     [[nodearray dynamic]]
@@ -430,10 +439,43 @@ Order = 10
         Conditions.Excluded := DynamicUseLowPrio isnt true
         Config.MinValue = -1
 
+        [[[parameter DefineNodesAvailabilityZone]]]
+        Label = Specify Availability Zones
+        DefaultValue = false
+        Widget.Plugin = pico.form.BooleanCheckBox
+        Widget.Label = Specify availability zones for nodes
+        
+        [[[parameter HPCAvailabilityZone]]]
+        Label = HPC Availability Zone
+        ParameterType = StringList
+        Conditions.Hidden := !DefineNodesAvailabilityZone
+        Description = List of availability zones where HPC nodes will be spread
+
+        [[[parameter HTCAvailabilityZone]]]
+        Label = HTC Availability Zone
+        ParameterType = StringList
+        Conditions.Hidden := !DefineNodesAvailabilityZone
+        Description = List of availability zones where HTC nodes will be spread
+
+        [[[parameter GPUAvailabilityZone]]]
+        Label = GPU Availability Zone
+        ParameterType = StringList
+        Conditions.Hidden := !DefineNodesAvailabilityZone
+        Description = List of availability zones where GPU nodes will be spread
+
         [[[parameter NumberLoginNodes]]]
         Label = Num Login Nodes
         DefaultValue = 0
         Description = Number of optional login nodes to create.
+        Config.Plugin = pico.form.NumberTextBox
+        Config.MinValue = 0
+        Config.MaxValue = 10000
+        Config.IntegerOnly = true
+
+        [[[parameter MaxLoginNodeCount]]]
+        Label = Max Login Nodes
+        DefaultValue = 10
+        Description = Maximum number of login nodes to create
         Config.Plugin = pico.form.NumberTextBox
         Config.MinValue = 0
         Config.MaxValue = 10000
@@ -721,8 +763,8 @@ Order = 20
         ParameterType = StringList
         Config.Plugin = pico.form.Dropdown
         Config.FreeForm = true
-        Config.Entries := {[Value="25.05.2"]}
-        DefaultValue = 25.05.2
+        Config.Entries := {[Value="25.11.4"]}
+        DefaultValue = 25.11.4
 
         [[[parameter configuration_slurm_accounting_enabled]]]
         Label = Job Accounting
@@ -737,7 +779,7 @@ Order = 20
 	Config.Template := "<table role=\"presentation\"><tr><td> <b>Note: Checking this box will create persistent databases and tables in SQL DB provided. Deleting this cluster will not automatically delete those databases. User is responsible for periodically purging/archiving their slurm databases to maintain costs.</b></td></tr></table>"
 
         [[[parameter configuration_slurm_accounting_url]]]
-        Label = Slurm DBD URL
+        Label = Database URL
         Description = URL of the database to use for Slurm job accounting
         Conditions.Excluded := configuration_slurm_accounting_enabled isnt true
 
@@ -747,25 +789,30 @@ Order = 20
         Conditions.Excluded := configuration_slurm_accounting_enabled isnt true
 
         [[[parameter configuration_slurm_accounting_user]]]
-        Label = Slurm DBD User
+        Label = Database User
         Description = User for Slurm DBD admin
         Conditions.Excluded := configuration_slurm_accounting_enabled isnt true
 
         [[[parameter configuration_slurm_accounting_password]]]
-        Label = Slurm DBD Password
+        Label = Database Password
         Description = Password for Slurm DBD admin
         ParameterType = Password
         Conditions.Excluded := configuration_slurm_accounting_enabled isnt true
 
-        [[[parameter configuration_slurm_accounting_certificate_url]]]
-        Label = SSL Certificate URL
-        Description = URL to fetch SSL certificate for authentication to DB. Use AzureCA.pem (embedded) for use with deprecated MariaDB instances.
+        [[[parameter configuration_slurm_accounting_custom_certificate_enabled]]]
+        Label = Custom SSL Certificate
+        Description = Enable to add custom SSL Certificate for DB Authentication. Default installs combined certs needed for Azure Database for MySQL.
+        DefaultValue = false
+        Widget.Plugin = pico.form.BooleanCheckBox
+        Widget.Label = Use custom SSL certificate for connecting to DB
         Conditions.Excluded := configuration_slurm_accounting_enabled isnt true
-        ParameterType = StringList
-        Config.Plugin = pico.form.Dropdown
-        Config.FreeForm = true
-        Config.Entries := {[Value=""], [Value="AzureCA.pem"]}
-        DefaultValue = ""
+
+        [[[parameter configuration_slurm_accounting_custom_certificate]]]
+        Label = Custom SSL Certificate for DB Authentication
+        Description = Content of Custom SSL Certificate for DB Authentication
+        Conditions.Excluded := configuration_slurm_accounting_enabled isnt true || configuration_slurm_accounting_custom_certificate_enabled isnt true
+        Conditions.Required := configuration_slurm_accounting_custom_certificate_enabled is true
+        ParameterType = Text
 
         [[[parameter EnableTerminateNotification]]]
         Label = Enable Termination notifications
@@ -819,42 +866,42 @@ Order = 20
         ParameterType = Cloud.Image
         Config.OS = linux
         DefaultValue = cycle.image.ubuntu22
-        Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
+        Config.Filter := Package in {"cycle.image.ubuntu24", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8", "almalinux9"}
 
         [[[parameter LoginImageName]]]
         Label = Login Node OS
         ParameterType = Cloud.Image
         Config.OS = linux
         DefaultValue = cycle.image.ubuntu22
-        Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
+        Config.Filter := Package in {"cycle.image.ubuntu24", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8", "almalinux9"}
 
         [[[parameter HPCImageName]]]
         Label = HPC OS
         ParameterType = Cloud.Image
         Config.OS = linux
         DefaultValue = cycle.image.ubuntu22
-        Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
+        Config.Filter := Package in {"cycle.image.ubuntu24", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8", "almalinux9"}
 
         [[[parameter HTCImageName]]]
         Label = HTC OS
         ParameterType = Cloud.Image
         Config.OS = linux
         DefaultValue = cycle.image.ubuntu22
-        Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
+        Config.Filter := Package in {"cycle.image.ubuntu24", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8", "almalinux9"}
 
         [[[parameter GPUImageName]]]
         Label = GPU OS
         ParameterType = Cloud.Image
         Config.OS = linux
         DefaultValue = cycle.image.ubuntu22
-        Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
+        Config.Filter := Package in {"cycle.image.ubuntu24", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8", "almalinux9"}
 
         [[[parameter DynamicImageName]]]
         Label = Dynamic OS
         ParameterType = Cloud.Image
         Config.OS = linux
         DefaultValue = cycle.image.ubuntu22
-        Config.Filter := Package in {"cycle.image.ubuntu20", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8"}
+        Config.Filter := Package in {"cycle.image.ubuntu24", "cycle.image.ubuntu22", "cycle.image.sles15-hpc", "almalinux8", "almalinux9"}
 
         [[[parameter SchedulerClusterInitSpecs]]]
         Label = Scheduler Cluster-Init
@@ -898,13 +945,13 @@ Order = 20
 
         [[[parameter ReturnProxy]]]
         Label = Return Proxy
-        DefaultValue = true
+        DefaultValue = false
         ParameterType = Boolean
         Config.Label = Use SSH tunnel to connect to CycleCloud (required if direct access is blocked)
 
         [[[parameter UsePublicNetwork]]]
         Label = Public Head Node
-        DefaultValue = true
+        DefaultValue = false
         ParameterType = Boolean
         Config.Label = Access scheduler node from the Internet
 
@@ -939,3 +986,30 @@ Order = 20
         DefaultValue = false
         Widget.Plugin = pico.form.BooleanCheckBox
         Widget.Label = Run Node Health Checks on startup
+
+[parameters Monitoring]
+Order = 25
+    [[parameters Cyclecloud Monitoring]]
+    Order = 10
+        [[[parameter monitoring_description]]]
+            HideLabel = true
+            Config.Plugin = pico.widget.HtmlTemplateWidget
+            Config.Template = <table role="presentation"><tr><td><p>Monitoring CycleCloud clusters with Prometheus and Grafana. Follow this <a href="https://github.com/azure/cyclecloud-monitoring/" target="_blank">README</a> for details on setting up Managed Monitoring Infrastructure.</p></td></tr></table>
+
+        [[[parameter configuration_monitoring_enabled]]]
+            Label = Monitoring
+            DefaultValue = false
+            Widget.Plugin = pico.form.BooleanCheckBox
+            Widget.Label = Enable Monitoring
+
+        [[[parameter configuration_identity_client_id]]]
+            Label = Client ID
+            Description = Client ID of the Managed Identity with Monitoring Metrics Publisher role
+            Conditions.Excluded := configuration_monitoring_enabled isnt true
+            Conditions.Required := configuration_monitoring_enabled is true
+
+        [[[parameter configuration_ingestion_endpoint]]]
+            Label = Ingestion Endpoint
+            Description = The Azure Monitor Workspace in which to push metrics
+            Conditions.Excluded := configuration_monitoring_enabled isnt true
+            Conditions.Required := configuration_monitoring_enabled is true
