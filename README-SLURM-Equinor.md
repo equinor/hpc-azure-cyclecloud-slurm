@@ -25,22 +25,25 @@ We have changed this from being a project in our main [hpc-azure-cyclecloud](htt
 
 Our changes and additions provide the below for OpenPBS project as delivered from Azure:
 
-- Use builtin python3.11 - 3.12 and beyond fails on `from requests.exceptions import ConnectionError`
+- Using OS  python3.11 and beyond fails on `from requests.exceptions import ConnectionError`
 
 - Skip package installs that are in our OS images
 
 ## Implementation 
 
-From a CycleCloud server, you will need to use a python3.12 for the package builds:
+From a CycleCloud server, you will need to use a python3.11 for the package builds  . python3.11 is hardcoded in some build scripts (for v4.0.8 at least)
 
 ```bash
+sudo dnf install python3.11 python3.11-pip python3.11-setuptools python3.11-devel
+git checkout v4.0.8
 # Create the venv
 mkdir -p ~/venv
-/usr/bin/python3.12 -m venv ~/venv/python3.12
-./source ~/venv/python3.12/bin/activate
+/usr/bin/python3.11 -m venv ~/venv/python3.11
+./source ~/venv/python3.11/bin/activate
 
-# Then build the packages - latest is 4.0.3 for SLURM 25.05.2
+# Then build the packages - latest is 4.0.8 for SLURM 25.11.4
 ./util/build.sh
 
 # Upload to CycleCloud blobs
 cyclecloud project upload azure-storage
+```
