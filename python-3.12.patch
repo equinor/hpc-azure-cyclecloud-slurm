@@ -1,0 +1,166 @@
+diff --git a/azure-slurm-exporter/pyproject.toml b/azure-slurm-exporter/pyproject.toml
+index 363df1a..8667de4 100644
+--- a/azure-slurm-exporter/pyproject.toml
++++ b/azure-slurm-exporter/pyproject.toml
+@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
+ name = "azure-slurm-exporter"
+ version = "0.1.0"
+ description = "Prometheus exporter for Azure CycleCloud Slurm metrics"
+-requires-python = ">=3.11"
++requires-python = ">=3.12"
+ license = "MIT"
+ authors = [
+     { name = "Azure CycleCloud Team" },
+diff --git a/azure-slurm-install/package.sh b/azure-slurm-install/package.sh
+index 323e3e3..a5c6c59 100755
+--- a/azure-slurm-install/package.sh
++++ b/azure-slurm-install/package.sh
+@@ -2,4 +2,4 @@
+ set -e
+ 
+ cd $(dirname $0)
+-python3.11 package.py $@
+\ No newline at end of file
++python3 package.py $@
+\ No newline at end of file
+diff --git a/azure-slurm/install.sh b/azure-slurm/install.sh
+index 4293f40..d0c7452 100755
+--- a/azure-slurm/install.sh
++++ b/azure-slurm/install.sh
+@@ -10,13 +10,13 @@ find_python3() {
+         echo $AZSLURM_PYTHON_PATH
+         return 0
+     fi
+-    for version in $( seq 11 20 ); do
++    for version in $( seq 12 20 ); do
+         which python3.$version
+         if [ $? == 0 ]; then
+             return 0
+         fi
+     done
+-    echo Could not find python3 version 3.11 >&2
++    echo Could not find python3 version 3.12 >&2
+     return 1
+ }
+ 
+diff --git a/azure-slurm/package.sh b/azure-slurm/package.sh
+index 20eedf1..101453e 100755
+--- a/azure-slurm/package.sh
++++ b/azure-slurm/package.sh
+@@ -13,15 +13,15 @@ rm -f dist/*
+ 
+ if [ "$LOCAL_SCALELIB" == "" ]; then
+     # we are using released versions of scalelib
+-    python3.11 package.py
++    python3.12 package.py
+ else
+     pushd $LOCAL_SCALELIB
+     rm -f dist/*.gz
+     # python3 setup.py swagger
+-    python3.11 setup.py sdist
++    python3.12 setup.py sdist
+     popd
+     # swagger=`ls $LOCAL_SCALELIB/dist/swagger*.gz`
+     scalelib=`ls $LOCAL_SCALELIB/dist/cyclecloud_scalelib*.gz`
+     # python3 package.py --scalelib $scalelib --swagger $swagger
+-    python3.11 package.py --scalelib $scalelib
++    python3.12 package.py --scalelib $scalelib
+ fi
+diff --git a/specs/scheduler/cluster-init/files/common.sh b/specs/scheduler/cluster-init/files/common.sh
+index 99b853e..d4cfd20 100755
+--- a/specs/scheduler/cluster-init/files/common.sh
++++ b/specs/scheduler/cluster-init/files/common.sh
+@@ -7,7 +7,7 @@ find_python3() {
+         echo $AZSLURM_PYTHON_PATH
+         return 0
+     fi
+-    for version in $( seq 11 20 ); do
++    for version in $( seq 12 20 ); do
+         which python3.$version > /dev/null 2>/dev/null
+         if [ $? == 0 ]; then
+             python3.$version -c "import venv"
+@@ -62,8 +62,9 @@ install_python3() {
+         PYTHON_BIN="/usr/bin/python3.12"
+ 
+     elif [ "$OS" == "rhel" ]; then
+-        echo "Detected RHEL, using system python3..." >&2
+-        PYTHON_BIN="/usr/bin/python3"
++        echo "Detected RHEL, using venv python3.12" >&2
++        PYTHON_BIN="/usr/bin/python3.12"
++        PYTHON_BIN="$HOME/venv/python3.12/bin/python3"
+ 
+     elif [ "$OS" == "azurelinux" ]; then
+         echo "Detected AzureLinux. Installing Python 3.12..." >&2
+diff --git a/templates/slurm-equinor-4.0.8-h.txt b/templates/slurm-equinor-4.0.8-h.txt
+index 9909952..cda32a4 100644
+--- a/templates/slurm-equinor-4.0.8-h.txt
++++ b/templates/slurm-equinor-4.0.8-h.txt
+@@ -65,8 +65,8 @@ runcmd:
+         slurm.user.gid = 1099
+         munge.user.uid = 1098
+         munge.user.gid = 1098
+-        slurm.slurmrestd.user.uid = 1099
+-        slurm.slurmrestd.user.gid = 1099
++        slurm.slurmrestd.user.uid = 1097
++        slurm.slurmrestd.user.gid = 1097
+         slurm.enable_healthchecks = false
+         slurm.accounting.enabled = $configuration_slurm_accounting_enabled
+         slurm.accounting.url = $configuration_slurm_accounting_url
+@@ -109,8 +109,7 @@ runcmd:
+         version = 1.0.0
+         
+         #[[[cluster-init healthagent:default]]]
+-        #[[[cluster-init monitoring:default]]]
+-        #[[[cluster-init slurm:default]]]
++        #[[[cluster-init monitoringcluster-init :default]]]
+         [[[cluster-init slurm:default]]]
+         version = $SLURMspec
+         Optional = true
+@@ -171,8 +170,8 @@ runcmd:
+         slurm.secondary_scheduler_name = ${ifThenElse(configuration_slurm_ha_enabled, "scheduler-ha-1", undefined)}
+ 
+ 
+-        [[[cluster-init healthagent:default]]]
+-        [[[cluster-init monitoring:default]]]
++        #[[[cluster-init healthagent:default]]]
++        #[[[cluster-init monitoringcluster-init :default]]]
+         [[[cluster-init slurm:scheduler]]]
+         version = $SLURMspec
+ 
+@@ -243,8 +242,8 @@ runcmd:
+         SubnetId = ${(toggle_TopNodeSubnetId is false) ? SubnetId : TopNodeSubnetId}
+ 
+         version = $SLURMspec
+-        [[[cluster-init healthagent:default]]]
+-        [[[cluster-init monitoring:default]]]
++        #[[[cluster-init healthagent:default]]]
++        #[[[cluster-init monitoringcluster-init :default]]]
+         [[[cluster-init slurm:login]]]
+ 
+         #[[[cluster-init slurm:pyxis]]]
+@@ -265,8 +264,8 @@ runcmd:
+         slurm.node_prefix = ${strcat(toLower(substr(ClusterName,0,4)),substr(ClusterName,-1,1),"-")}
+         slurm.use_nodename_as_hostname = $NodeNameIsHostname
+ 
+-        [[[cluster-init healthagent:default]]]
+-        [[[cluster-init monitoring:default]]]
++        #[[[cluster-init healthagent:default]]]
++        #[[[cluster-init monitoringcluster-init :default]]]
+         [[[cluster-init slurm:execute]]]
+         version = $SLURMspec
+         #[[[cluster-init slurm:pyxis]]]
+diff --git a/util/Dockerfile b/util/Dockerfile
+index d4cf5e0..25b98e8 100644
+--- a/util/Dockerfile
++++ b/util/Dockerfile
+@@ -1,4 +1,4 @@
+-FROM python:3.11
+-RUN pip3.11 install --upgrade setuptools
+-RUN pip3.11 install --upgrade wheel
+-RUN pip3.11 install requests
+\ No newline at end of file
++FROM python:3.12
++RUN pip3.12 install --upgrade setuptools
++RUN pip3.12 install --upgrade wheel
++RUN pip3.12 install requests
+\ No newline at end of file
