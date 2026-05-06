@@ -65,8 +65,8 @@ runcmd:
         slurm.user.gid = 1099
         munge.user.uid = 1098
         munge.user.gid = 1098
-        slurm.slurmrestd.user.uid = 1099
-        slurm.slurmrestd.user.gid = 1099
+        slurm.slurmrestd.user.uid = 1097
+        slurm.slurmrestd.user.gid = 1097
         slurm.enable_healthchecks = false
         slurm.accounting.enabled = $configuration_slurm_accounting_enabled
         slurm.accounting.url = $configuration_slurm_accounting_url
@@ -109,8 +109,7 @@ runcmd:
         version = 1.0.0
         
         #[[[cluster-init healthagent:default]]]
-        #[[[cluster-init monitoring:default]]]
-        #[[[cluster-init slurm:default]]]
+        #[[[cluster-init monitoringcluster-init :default]]]
         [[[cluster-init slurm:default]]]
         version = $SLURMspec
         Optional = true
@@ -171,8 +170,8 @@ runcmd:
         slurm.secondary_scheduler_name = ${ifThenElse(configuration_slurm_ha_enabled, "scheduler-ha-1", undefined)}
 
 
-        [[[cluster-init healthagent:default]]]
-        [[[cluster-init monitoring:default]]]
+        #[[[cluster-init healthagent:default]]]
+        #[[[cluster-init monitoringcluster-init :default]]]
         [[[cluster-init slurm:scheduler]]]
         version = $SLURMspec
 
@@ -243,8 +242,8 @@ runcmd:
         SubnetId = ${(toggle_TopNodeSubnetId is false) ? SubnetId : TopNodeSubnetId}
 
         version = $SLURMspec
-        [[[cluster-init healthagent:default]]]
-        [[[cluster-init monitoring:default]]]
+        #[[[cluster-init healthagent:default]]]
+        #[[[cluster-init monitoringcluster-init :default]]]
         [[[cluster-init slurm:login]]]
 
         #[[[cluster-init slurm:pyxis]]]
@@ -265,8 +264,8 @@ runcmd:
         slurm.node_prefix = ${strcat(toLower(substr(ClusterName,0,4)),substr(ClusterName,-1,1),"-")}
         slurm.use_nodename_as_hostname = $NodeNameIsHostname
 
-        [[[cluster-init healthagent:default]]]
-        [[[cluster-init monitoring:default]]]
+        #[[[cluster-init healthagent:default]]]
+        #[[[cluster-init monitoringcluster-init :default]]]
         [[[cluster-init slurm:execute]]]
         version = $SLURMspec
         #[[[cluster-init slurm:pyxis]]]
