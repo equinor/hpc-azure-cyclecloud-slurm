@@ -109,9 +109,9 @@ runcmd:
         version = 1.0.0
         
         #[[[cluster-init healthagent:default]]]
-        #[[[cluster-init cyclecloud/monitoring:default]]]
+        #[[[cluster-init monitoring:default]]]
         #[[[cluster-init slurm:default]]]
-        [[[cluster-init cyclecloud/slurm:default]]]
+        [[[cluster-init slurm:default]]]
         version = $SLURMspec
         Optional = true
         #[[[cluster-init slurm:pyxis]]]
@@ -171,9 +171,9 @@ runcmd:
         slurm.secondary_scheduler_name = ${ifThenElse(configuration_slurm_ha_enabled, "scheduler-ha-1", undefined)}
 
 
-        [[[cluster-init cyclecloud/healthagent:default]]]
-        [[[cluster-init cyclecloud/monitoring:default]]]
-        [[[cluster-init cyclecloud/slurm:scheduler]]]
+        [[[cluster-init healthagent:default]]]
+        [[[cluster-init monitoring:default]]]
+        [[[cluster-init slurm:scheduler]]]
         version = $SLURMspec
 
         #[[[cluster-init slurm:pyxis]]]
@@ -243,9 +243,9 @@ runcmd:
         SubnetId = ${(toggle_TopNodeSubnetId is false) ? SubnetId : TopNodeSubnetId}
 
         version = $SLURMspec
-        [[[cluster-init cyclecloud/healthagent:default]]]
-        [[[cluster-init cyclecloud/monitoring:default]]]
-        [[[cluster-init cyclecloud/slurm:login]]]
+        [[[cluster-init healthagent:default]]]
+        [[[cluster-init monitoring:default]]]
+        [[[cluster-init slurm:login]]]
 
         #[[[cluster-init slurm:pyxis]]]
         #version = $SLURMspec
@@ -265,9 +265,9 @@ runcmd:
         slurm.node_prefix = ${strcat(toLower(substr(ClusterName,0,4)),substr(ClusterName,-1,1),"-")}
         slurm.use_nodename_as_hostname = $NodeNameIsHostname
 
-        [[[cluster-init cyclecloud/healthagent:default]]]
-        [[[cluster-init cyclecloud/monitoring:default]]]
-        [[[cluster-init cyclecloud/slurm:execute]]]
+        [[[cluster-init healthagent:default]]]
+        [[[cluster-init monitoring:default]]]
+        [[[cluster-init slurm:execute]]]
         version = $SLURMspec
         #[[[cluster-init slurm:pyxis]]]
         #version = $SLURMspec
@@ -942,7 +942,7 @@ Order = 20
         Conditions.Excluded := configuration_slurm_accounting_enabled isnt true || configuration_slurm_accounting_custom_certificate_enabled isnt true
         Conditions.Required := configuration_slurm_accounting_custom_certificate_enabled is true
         ParameterType = Text
-        
+
         [[[parameter EnableTerminateNotification]]]
         Label = Enable Termination notifications
         DefaultValue = True        
