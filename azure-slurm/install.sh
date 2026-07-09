@@ -21,8 +21,22 @@ find_python3() {
 }
 
 setup_venv() {
-    
+
     set -e
+
+    # Override any restrictive umask (e.g. UMASK 027 on CIS-hardened images)
+    # for the duration of this function so that all directories and files
+    # created here — including the venv, pip-installed packages, and generated
+    # wrapper scripts — get predictable 0755/0644 permissions.
+    local old_umask
+    old_umask=$(umask)
+    umask 022
+
+    # Create parent directories with explicit 0755 permissions before the venv.
+    # Also chmod explicitly in case the directories already exist with restrictive
+    # permissions from a previous (failed) run.
+    install -d -m 0755 /opt/azurehpc && chmod 0755 /opt/azurehpc
+    install -d -m 0755 $INSTALL_DIR && chmod 0755 $INSTALL_DIR
 
     $PYTHON_PATH -c "import sys; sys.exit(0)" || (echo "$PYTHON_PATH is not a valid python3 executable. Please install python3.11 or higher." && exit 1)
     $PYTHON_PATH -m pip --version > /dev/null || $PYTHON_PATH -m ensurepip
@@ -31,6 +45,11 @@ setup_venv() {
     set +e
     source $VENV/bin/activate
     set -e
+
+    # Set the RETURN trap only after 'source' to avoid it firing prematurely
+    # when the sourced script returns. This ensures the original umask is
+    # restored on any subsequent exit path — both normal return and early error.
+    trap "umask $old_umask" RETURN
 
     # ensure wheel is installed
     python3 -m pip install wheel
@@ -86,15 +105,32 @@ fi
 EOF
     fi
 
-    azslurm -h 2>&1 > /dev/null || exit 1
+    azslurm -h > /dev/null 2>&1 || return 1
 }
 
 setup_install_dir() {
-    mkdir -p $INSTALL_DIR/logs
+    install -d -m 0755 $INSTALL_DIR/logs && chmod 0755 $INSTALL_DIR/logs
     cp logging.conf $INSTALL_DIR/
     cp sbin/*.sh $INSTALL_DIR/
     chown slurm:slurm $INSTALL_DIR/*.sh
     chmod +x $INSTALL_DIR/*.sh
+}
+
+setup_scale_m1() {
+    # scale_m1 is the InterconnectGroups (gbx00) scaling tool. It is installed on
+    # the scheduler exactly like azslurm: a venv-resident executable wired to the
+    # venv python (so it can import slurmcc) plus a ~/bin symlink. It is
+    # intentionally NOT installed on execute nodes. Re-running install.sh
+    # re-installs it cleanly (install -m and ln -sf are idempotent).
+    if [ ! -f scale_m1/scale_to_n_nodes.py ]; then
+        echo "scale_m1 entrypoint not found in package; skipping scale_m1 install." >&2
+        return 0
+    fi
+    install -m 0755 scale_m1/scale_to_n_nodes.py $VENV/bin/scale_m1
+    if [ ! -e ~/bin ]; then
+        mkdir ~/bin
+    fi
+    ln -sf $VENV/bin/scale_m1 ~/bin/
 }
 
 init_azslurm_config() {
@@ -179,6 +215,8 @@ main() {
     setup_venv
     # setup the install dir - logs and logging.conf, some permissions.
     setup_install_dir
+    # install the scale_m1 (gbx00) scaling tool on the scheduler, like azslurm.
+    setup_scale_m1
     # setup the azslurmd but do not start it.
     setup_azslurmd
     # If there is no jetpack, we have to stop here.

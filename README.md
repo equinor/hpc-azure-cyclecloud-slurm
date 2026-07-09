@@ -5,21 +5,24 @@ CycleCloud Slurm Clusters in Azure
 This project sets up an auto-scaling Slurm cluster
 Slurm is a highly configurable open source workload manager. See the [Slurm project site](https://www.schedmd.com/) for an overview.
 # Table of Contents:
-1. [Managing Slurm Clusters in 4.0.8](#managing-slurm-clusters)
+1. [Managing Slurm Clusters in 4.0.9](#managing-slurm-clusters-in-409)
     1. [Making Cluster Changes](#making-cluster-changes)
     2. [No longer pre-creating execute nodes](#no-longer-pre-creating-execute-nodes)
     3. [Creating additional partitions](#creating-additional-partitions)
-    4. [Dynamic Partitions](#dynamic-partitions)
-    5. [Using Dynamic Partitions to Autoscale](#using-dynamic-partitions-to-autoscale)
-    6. [Manual scaling](#manual-scaling)
-    7. [Slurm Job Accounting](#slurm-job-accounting)
+    4. [Custom Partition name](#custom-partition-name)
+    5. [Dynamic Partitions](#dynamic-partitions)
+    6. [Using Dynamic Partitions to Autoscale](#using-dynamic-partitions-to-autoscale)
+    7. [Manual scaling](#manual-scaling)
+    8. [Slurm Job Accounting](#slurm-job-accounting)
         1. [Cost Reporting](#cost-reporting)
-    8. [Topology](#topology)
-    9. [GB200/GB300 IMEX Support](#gb200gb300-imex-support)
-    10. [Setting KeepAlive in CycleCloud](#setting-keepalive)
-    11. [Slurmrestd](#slurmrestd)
-    12. [Node Health Checks](#node-health-checks)
-    13. [Monitoring](#monitoring)
+    9. [Topology](#topology)
+    10. [Scaling with scale_m1 (GB200/GB300)](#scaling-with-scale_m1-gb200gb300)
+    11. [GB200/GB300 IMEX Support](#gb200gb300-imex-support)
+    12. [Setting KeepAlive in CycleCloud](#setting-keepalive)
+    13. [Custom Scheduler Names With High-Availability](#custom-scheduler-names-with-high-availability)
+    14. [Slurmrestd](#slurmrestd)
+    15. [Node Health Checks](#node-health-checks)
+    16. [Monitoring](#monitoring)
         1. [AzSlurm Exporter](#azslurm-exporter)
             1. [Exported Metrics](#exported-metrics)
             2. [Configure Exporter Port](#configure-exporter-port)
@@ -39,7 +42,7 @@ Slurm is a highly configurable open source workload manager. See the [Slurm proj
     8. [Capturing logs and configuration for troubleshooting](#capturing-logs-and-configuration-data-for-troubleshooting)
 6. [Contributing](#contributing)
 ---
-## Managing Slurm Clusters in 4.0.8
+## Managing Slurm Clusters in 4.0.9
 
 ### Making Cluster Changes
 In CycleCloud, cluster changes can be made using the "Edit" dialog from the cluster page in the GUI or from the CycleCloud CLI.   Cluster topology changes, such as new partitions, generally require editing and re-importing the cluster template.   This can be applied to live, running clusters as well as terminated clusters.   It is also possible to import changes as a new Template for future cluster creation via the GUI.
@@ -93,6 +96,14 @@ The default template that ships with Azure CycleCloud has four partitions (`hpc`
 
 # Any new parameters [SpecialGPUMachineType, MaxSpecialGPUCoreCount] should be added n the [[parameters]] section
 
+```
+
+### Custom Partition name
+If the naming convention for the actual nodearray is not identical to the desired partition name, you can simply override this with the `slurm.partition` configuration option.
+```ini
+  [[nodearray my_custom_name]]
+    [[[configuration]]]
+    slurm.partition = my-custom-name
 ```
 
 ### Dynamic Partitions
@@ -192,13 +203,13 @@ To setup job accounting, following fields are defined in the slurm cluster creat
                     Each cluster typically (when not defined) has its own database. This helps to not cause roll ups between starting clusters of different slurm versions.
 - *Database User* - This refers to the username slurmdbd will use to connect to MySQL Server.
 - *Database Password* - This refers to the password slurmdbd will use to connect to MySQL Server.
-- *SSL Certificate URL* - If mysql connection requires SSL then this URL is used to provide certificate URL.
+- *Custom SSL Certificate* - Enable this toggle if the database connection requires a custom SSL certificate.  By default, the following certificates are configured for Azure Database for MySQL Flexible Server as a combined CA bundle.
+  - https://cacerts.digicert.com/DigiCertGlobalRootCA.crt.pem
+  - https://cacerts.digicert.com/DigiCertGlobalRootG2.crt.pem
+  - https://www.microsoft.com/pkiops/certs/Microsoft%20RSA%20Root%20Certificate%20Authority%202017.crt
 
-***For connecting with MySql Flex, enter the following URL for SSL certificate***:
+- *Custom SSL Certificate for DB Authentication* - Paste the PEM contents of the custom SSL certificate into this field.
 
-```
-https://cacerts.digicert.com/DigiCertGlobalRootG2.crt.pem
-```
 
 ***Do Note: When deleting clusters, their corresponding databases in MySql are not deleted. User is responsible for archiving/purging their databases and manage their mysql costs.***
 
@@ -354,6 +365,108 @@ BlockSizes=5
 This either prints out the topology in slurm topology format or creates an output file with the topology.
 
 
+### Scaling with scale_m1 (GB200/GB300)
+`scale_m1` is the InterconnectGroups Milestone 1 (M1) scaling tool for GB200/GB300 (gbx00) clusters. It scales a Slurm partition to an exact size while pruning the generated topology so that only fully populated racks are kept. It is essentially `azslurm scale` specialized for rack-aligned gbx00 hardware.
+
+It is installed on the scheduler node automatically by the azure-slurm installer (alongside `azslurm`) and runs under the same virtual environment at `/opt/azurehpc/slurm/venv`. It is not installed on execute nodes. Logs are written to `/opt/azurehpc/slurm/logs/scale_m1.log`.
+
+#### Required slurm.conf settings
+To use GB200/GB300, the block topology plugin must be enabled and the gbx00 partition must be excluded from auto-suspend:
+
+```
+TopologyParam=BlockAsNodeRank
+TopologyPlugin=topology/block
+# exclude any partition that uses gbx00
+SuspendExcParts=gpu
+```
+
+**Do not** add these lines to the template's **Slurm Configuration** parameter (`additional_slurm_config` / `AdditionalSlurmConfig`). `TopologyPlugin=topology/block` requires a populated `topology.conf` to exist before `slurmctld` starts; applying it at cluster creation, before any nodes are scaled and the topology is generated, prevents `slurmctld` from starting.
+
+Instead, apply them manually on the scheduler **after** the nodes are scaled and the block topology file is in place. Add the lines to `/etc/slurm/site_specific.conf` (which is included by `slurm.conf`) and run `scontrol reconfigure`. Replace `gpu` in `SuspendExcParts` with the name of the partition that uses gbx00 nodes if it differs. The full ordering is shown in the workflow below.
+
+#### Workflow
+With the cluster running and an SSH session open on the scheduler node, the end-to-end process is:
+
+1. **Scale the partition** to the target size — reserve the nodes, then power up to the target.
+2. **Generate the block topology and put it in place** at `/sched/<clustername>/topology.conf`.
+3. **Enable the block topology plugin** by adding the required settings to `/etc/slurm/site_specific.conf`, then run `scontrol reconfigure`.
+4. **Release the ready nodes** from the reservation so jobs can be scheduled on them.
+
+When releasing nodes in the final step, remove only the nodes that are powered up and ready to run jobs. Leave all powered-off or unhealthy nodes in the reservation, and do **not** delete the reservation — deleting it would also release the not-yet-ready nodes back to the cluster.
+
+```bash
+# 1. Ensure that Slurm will not suspend these nodes by adding the following line the following lines to /etc/slurm/site_specific.conf (included by slurm.conf):
+# SuspendExcParts=gpu
+$EDITOR /etc/slurm/site_specific.conf
+#Apply the configuration
+scontrol reconfigure
+
+# 2. Reserve the partition's nodes under the scale_m1 reservation
+scale_m1 create_reservation -p gpu
+
+# 3. Power up 28 racks (504 nodes) to the target size
+scale_m1 power_up --racks 28
+
+# 4. Generate the block topology for the partition (--block_size 18 = one rack per block)
+azslurm topology -n --block --block_size 18 -p gpu > topology.conf
+
+# 5. Review topology.conf, then copy it into place.
+#    For a cluster named "ccw":
+cp topology.conf /sched/ccw/topology.conf
+
+# 6. Enable the block topology plugin adding the the following lines to /etc/slurm/site_specific.conf (the same file as step 1)
+#    
+#      TopologyParam=BlockAsNodeRank
+#      TopologyPlugin=topology/block
+$EDITOR /etc/slurm/site_specific.conf
+#Apply the configuration
+scontrol reconfigure
+
+# 7. Remove only the powered-up, ready nodes from the reservation so workloads can run on them.
+#    Leave all powered-off or unhealthy nodes in the reservation; do not delete the reservation.
+#    Update the reservation so it contains only the nodes that are NOT yet ready. For example,
+#    if ccw-1-3-gpu-[1-3] are still powering up or unhealthy, keep just those reserved:
+scontrol update ReservationName=scale_m1 Nodes=ccw-1-3-gpu-[1-3]
+```
+
+#### Overprovisioning to absorb unhealthy hardware (advanced)
+In rare cases you may want to power up extra nodes so that unhealthy hardware can be discarded while still reaching the target size. `power_up` accepts an overprovision buffer, and `prune` / `prune_now` then trim back to the target, keeping only fully populated racks:
+
+```bash
+# Power up 28 racks plus a 6-rack (108-node) buffer to absorb unhealthy hardware
+scale_m1 power_up --racks 28 --overprovision-racks 6
+
+# Prune back to 28 racks. `prune` prints the nodes to terminate; `prune_now` also terminates them
+scale_m1 prune --racks 28 > to_terminate.txt
+scale_m1 prune_now --racks 28
+```
+
+After pruning to the target size, continue with the topology generation, configuration, and reservation steps from the workflow above.
+
+#### Subcommands
+| Subcommand | Purpose |
+| --- | --- |
+| `create_reservation` | Create the `scale_m1` reservation over reservable nodes in a partition. |
+| `power_up` | Power up nodes to reach the target size (plus an optional overprovision buffer). |
+| `prune` | Print the list of nodes to terminate to reach the target size. |
+| `prune_now` | Prune to the target size and terminate the excess nodes. |
+
+#### Sizing by racks or nodes
+`power_up`, `prune`, and `prune_now` accept the target size as either nodes or racks. One rack is 18 nodes, so `--racks N` is equivalent to `--target-count (N * 18)`:
+
+- `-n` / `--target-count <nodes>` — target an exact node count.
+- `--racks <racks>` — target a whole number of racks (1 rack = 18 nodes).
+
+`--target-count` and `--racks` are mutually exclusive; exactly one must be supplied, and the count must be positive.
+
+`power_up` additionally accepts an overprovision buffer, expressed in nodes or racks. The buffer defaults to 0 when omitted:
+
+- `-b` / `--overprovision <nodes>` — overprovision an exact number of extra nodes.
+- `--overprovision-racks <racks>` — overprovision a whole number of extra racks.
+
+`--overprovision` and `--overprovision-racks` are mutually exclusive and must be non-negative.
+
+
 ### GB200/GB300 IMEX Support
 Cyclecloud Slurm clusters now include prolog and epilog scripts to enable and cleanup IMEX service on a per-job basis. The prolog script will attempt to kill an existing IMEX service before configuring a new instance that will be specific to the new, submitted job. The epilog script terminates the IMEX service. By default, these scripts will run for GB200/GB300 nodes and not run for non-GB200/GB300 nodes. A configurable parameter `slurm.imex.enabled` has been added to the slurm cluster configuration template to allow non-GB200/GB300 nodes to enable IMEX support for their jobs or allow GB200/GB300 nodes to disable IMEX support for their jobs.
 ```
@@ -368,6 +481,17 @@ Cyclecloud Slurm clusters now include prolog and epilog scripts to enable and cl
 Added in 4.0.5: If the KeepAlive attribute is set in the CycleCloud UI, then the azslurmd will add that node's name to the `SuspendExcNodes` attribute via scontrol. Note that it is required that `ReconfigFlags=KeepPowerSaveSettings` is set in the slurm.conf, as is the default as of 4.0.5. Once KeepALive is set back to false, `azslurmd` will then remove this node from `SuspendExcNodes`.
 
 If a node is added to `SuspendExcNodes` either via `azslurm keep_alive` or via the scontrol command, then `azslurmd` will not remove this node from the `SuspendExcNodes` if KeepAlive is false in CycleCloud. However, if the node is later set to KeepAlive as true in the UI then `azslurmd` will then remove it from `SuspendExcNodes` when the node is set back to KeepAlive is false.
+
+### Custom Scheduler Names With High-Availability
+To override the default scheduler and scheduler-ha node names, i.e. such that you have a custom template which redefines [node scheduler] or [nodearray scheduler-ha], set the following values under the cluster or nodearray `configuration` section in your template:
+
+```ini
+[[[configuration]]]
+slurm.primary_scheduler_name = <scheduler-node-name>
+slurm.secondary_scheduler_name = <scheduler-ha-node-name>
+```
+
+These settings are required to tell the installer which exact CycleCloud node represents the primary and secondary scheduler. **The [node]'s hostname is controlled by the ComputerName attribute, which will still be ClusterName-scheduler unless you change this. Only the [nodearray] here will automatically match the hostname.** 
 
 ### Slurmrestd
 As of version 4.0.5, `slurmrestd` is automatically configured and started on the scheduler node and scheduler-ha node for all Slurm clusters. This REST API service provides programmatic access to Slurm functionality, allowing external applications and tools to interact with the cluster. For more information on the Slurm REST API, see the [official Slurm REST API documentation](https://slurm.schedmd.com/rest_api.html). Slurmrestd is configured with JWT authentication if the libjwt library is installed, otherwise it uses munge-only authentication. For more information on authentication refer to the [Security section](https://slurm.schedmd.com/rest.html#security) of the Slurm REST API documentation.
@@ -437,7 +561,7 @@ To check if the configured exporters are exposing metrics, connect to a node and
 
 #### AzSlurm Exporter
 
-The AzSlurm Exporter is a lightweight, asynchronous Prometheus exporter that runs on the Slurm scheduler node as a systemd service and exposes Slurm cluster metrics on default port `9101` at the `/metrics` endpoint. It periodically queries cluster available CLI tools (`squeue`, `sacct`, `sinfo`, `azslurm`, `jetpack`), parses their output, and publishes metrics in Prometheus format for ingestion by Azure Monitor or any Prometheus-compatible monitoring system.
+The AzSlurm Exporter is a lightweight, asynchronous Prometheus exporter that runs on the Slurm scheduler node as a systemd service and exposes Slurm cluster metrics on default port `9101` at the `/metrics` endpoint. It periodically queries cluster available CLI tools (`squeue`, `sacct`, `sinfo`, `sdiag`, `azslurm`, `jetpack`), parses their output, and publishes metrics in Prometheus format for ingestion by Azure Monitor or any Prometheus-compatible monitoring system.
 
 If a collector binary is unavailable, that collector is skipped with a warning. The exporter only exits if **no** collectors initialize successfully.
 
@@ -450,7 +574,6 @@ Log can be found under `/var/log/azslurm-exporter.log`
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `squeue_partition_jobs_state` | Gauge | `partition`, `state` | Number of jobs in each state per partition |
-| `squeue_job_nodes_allocated` | Gauge | `job_id`, `job_name`, `partition`, `state`, `nodelist`, `start_time` | Nodes allocated to each running job |
 
 **sacct metrics**
 
@@ -467,6 +590,18 @@ Terminal states tracked: `completed`, `failed`, `cancelled`, `timeout`, `node_fa
 | `sinfo_partition_nodes_state` | Gauge | `node_list`, `partition`, `state`, `reason` | Number of nodes in each state per partition |
 
 Node state suffixes (e.g. `*` = not responding, `~` = powered off, `#` = powering up) are normalized to descriptive state names.
+
+**sdiag metrics**
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `sdiag_server_thread_count` | Gauge | | Number of server threads currently active in slurmctld |
+| `sdiag_agent_queue_size` | Gauge | | Number of outgoing RPC requests queued for compute nodes |
+| `sdiag_dbd_agent_queue_size` | Gauge | | Number of messages queued for Slurm database daemon |
+| `sdiag_main_cycle_time_us` | Gauge | `type` | Main scheduling cycle time in microseconds (type: last, max, mean) |
+| `sdiag_main_mean_depth_cycle` | Gauge | | Mean number of jobs examined per scheduling cycle |
+
+The `sdiag` collector provides essential scheduler health metrics for monitoring cluster performance and identifying potential issues. It queries `sdiag --json` at 300-second intervals (default) to minimize scheduler overhead.
 
 **azslurm metrics**
 
@@ -497,7 +632,7 @@ systemctl restart azslurm-exporter
 #### Example Dashboards
 
 **AzSlurm Dashboard**
-![Alt](/images/azslurmexporterdash.png "Example AzSlurm Exporter Grafana Dashboard")
+![Alt](/images/azslurmdash2.png "Example AzSlurm Exporter Grafana Dashboard")
 To add the AzSlurm Exporter Dashboards to an existing Azure Managed Grafana instance run these commands
 ```
 git clone https://github.com/Azure/cyclecloud-slurm.git
@@ -506,14 +641,14 @@ cd cyclecloud-slurm/azure-slurm-exporter
 ```
 
 **GPU Device View Dashboard**
-![Alt](/images/dcgmdash.png "Example DCGM Exporter Grafana Dashboard")
+![Alt](/images/gpudash2.png "Example DCGM Exporter Grafana Dashboard")
 
 **Node View Dashboard**
-![Alt](/images/nodeexporterdash.png "Example Node Exporter Grafana Dashboard")
+![Alt](/images/nodeviewdash2.png "Example Node Exporter Grafana Dashboard")
 
 
 ## Supported Slurm and PMIX versions
-The current slurm version supported is `25.11.4` which is compiled with PMIX version `4.2.9`.
+The current slurm version supported is `25.11.5` which is compiled with PMIX version `4.2.9`.
 ## Packaging
 Slurm and PMIX packages are fetched and downloaded exclusively from packages.microsoft.com.
 ### Supported OS and PMC Repos
@@ -544,7 +679,7 @@ The following table describes the Slurm-specific configuration options you can t
 
 | Slurm specific configuration options | Description |
 | ------------------------------------ | ----------- |
-| slurm.version                        | Default: `25.11.4`. Sets the version of Slurm to install and run.  |
+| slurm.version                        | Default: `25.11.5`. Sets the version of Slurm to install and run.  |
 | slurm.insiders                        | Default: `false`. Setting that controls whethere slurm is installed from pmc stable repo or pmc insiders repo. Set to `true` to install from insiders repo.  |
 | slurm.autoscale                      | Default: `false`. A per-nodearray setting that controls whether Slurm automatically stops and starts nodes in this node array. |
 | slurm.hpc                            | Default: `true`. A per-nodearray setting that controls whether nodes in the node array are in the same placement group. Primarily used for node arrays that use VM families with InfiniBand. It only applies when `slurm.autoscale` is set to `true`. |

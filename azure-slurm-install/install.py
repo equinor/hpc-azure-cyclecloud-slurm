@@ -10,7 +10,7 @@ import installlib as ilib
 from typing import Dict, Optional
 
 # Combined Certs needed to connect to Azure Database for MySQL Server
-COMBINED_CERTS = "AzureCA_4.0.8.pem"
+COMBINED_CERTS = "AzureCA_4.0.9.pem"
 
 class InstallSettings:
     def __init__(self, config: Dict, platform_family: str, mode: str) -> None:
@@ -133,6 +133,7 @@ class InstallSettings:
         )
         self.launch_parameters = config["slurm"].get("launch_parameters", "")
 
+        self.primary_scheduler_name = config["slurm"].get("primary_scheduler_name") or "scheduler"
         self.secondary_scheduler_name = config["slurm"].get("secondary_scheduler_name")
         self.is_primary_scheduler = config["slurm"].get("is_primary_scheduler", self.mode == "scheduler")
         self.config_dir = f"/sched/{self.slurm_cluster_name}"
@@ -306,7 +307,7 @@ def fix_permissions(s: InstallSettings) -> None:
     )
 
     ilib.directory(
-        "/run/munge", owner=s.munge_user, group=s.munge_grp, mode=755, recursive=True
+        "/run/munge", owner=s.munge_user, group=s.munge_grp, mode=755
     )
 
     ilib.directory(f"{s.config_dir}/munge", owner=s.munge_user, group=s.munge_grp, mode=700)
@@ -520,8 +521,10 @@ def _complete_install_primary(s: InstallSettings) -> None:
             health_interval = 60
             health_program = f"{s.config_dir}/health.sh"
             epilog_program = f"{s.config_dir}/epilog.d/10-health_epilog.sh"
+            prolog_program = f"{s.config_dir}/prolog.d/10-health_prolog.sh"
             ilib.copy_file("/etc/healthagent/health.sh.example", health_program, owner="root", group="root", mode=755)
             ilib.copy_file("/etc/healthagent/epilog.sh.example", epilog_program, owner="root", group="root", mode=755)
+            ilib.copy_file("/etc/healthagent/prolog.sh.example", prolog_program, owner="root", group="root", mode=755)
 
     ilib.template(
         f"{s.config_dir}/slurm.conf",
@@ -1164,7 +1167,7 @@ def main() -> None:
         if settings.is_primary_scheduler == False:
             # This is the HA node.
             logging.info(f"Secondary Scheduler {settings.secondary_scheduler_name} starting wait on primary to finish converging.")
-            ilib.await_node_converge(settings.config, "scheduler", timeout=600)
+            ilib.await_node_converge(settings.config, settings.primary_scheduler_name, timeout=600)
 
     if settings.mode == "execute":
         setup_slurmd(settings)
