@@ -4,7 +4,7 @@
 ################################
 
 
-[cluster Slurm-EQ-4h]
+[cluster Slurm-EQ-4i]
 FormLayout = selectionpanel
 Category = Equinor Test
 IconURL = https://communicationtoolbox.equinor.com/original/gallery/12366/files/original/816ece30-56bf-40f3-b362-56e96381f12f.png
